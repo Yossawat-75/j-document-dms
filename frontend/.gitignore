@@ -1,0 +1,51 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Node / Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Python / FastAPI / Celery
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Environment & Secrets
+.env
+*.env
+
+# Uploaded Files & Local Storage (ห้ามเอาไฟล์สแกน/เอกสารจริงขึ้น Git)
+uploads/
+scanner_inbox/
+storage/
+
+# Docker Volumes & Databases (ห้ามนำ data ฐานข้อมูลขึ้น Git)
+postgres_data/
+minio_data/
+redis_data/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
