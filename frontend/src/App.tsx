@@ -100,6 +100,7 @@ export default function App() {
   const [branches, setBranches] = useState<{ id: number; name: string }[]>([]);
   
   const [searchQuery, setSearchQuery] = useState('');
+  const searchQueryRef = useRef('');
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const searchContainerRef = useRef<HTMLDivElement>(null);
@@ -168,6 +169,11 @@ export default function App() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newDeptName, setNewDeptName] = useState('');
   const [newBranchName, setNewBranchName] = useState('');
+
+  // Sync ref ค่าคำค้นหาให้ตรงกับ State เสมอ
+  useEffect(() => {
+    searchQueryRef.current = searchQuery;
+  }, [searchQuery]);
 
   useEffect(() => {
     if (currentUser) {
@@ -272,10 +278,11 @@ export default function App() {
     }
   };
 
-  const fetchDocs = async () => {
+  const fetchDocs = async (queryOverride?: string) => {
     try {
+      const activeQuery = queryOverride !== undefined ? queryOverride : searchQueryRef.current;
       let url = `${API_BASE}/documents/search?`;
-      if (searchQuery) url += `q=${encodeURIComponent(searchQuery)}&`;
+      if (activeQuery) url += `q=${encodeURIComponent(activeQuery)}&`;
       if (selectedCat) url += `category_id=${selectedCat}&`;
       if (selectedDept) url += `department_id=${selectedDept}&`;
       if (selectedBranch) url += `branch_id=${selectedBranch}&`;
@@ -292,6 +299,7 @@ export default function App() {
 
   const handleSearchInputChange = async (val: string) => {
     setSearchQuery(val);
+    searchQueryRef.current = val;
     if (val.trim().length > 0) {
       try {
         const res = await fetch(`${API_BASE}/documents/suggestions?q=${encodeURIComponent(val.trim())}`);
@@ -304,19 +312,20 @@ export default function App() {
     } else {
       setSuggestions([]);
       setShowSuggestions(false);
+      fetchDocs('');
     }
   };
 
   const handleSelectSuggestion = (suggestion: string) => {
     setSearchQuery(suggestion);
+    searchQueryRef.current = suggestion;
     setShowSuggestions(false);
-    setTimeout(() => {
-      fetchDocs();
-    }, 50);
+    fetchDocs(suggestion);
   };
 
   const resetFilters = () => {
     setSearchQuery('');
+    searchQueryRef.current = '';
     setSuggestions([]);
     setShowSuggestions(false);
     setSelectedCat(null);
@@ -324,6 +333,7 @@ export default function App() {
     setSelectedBranch(null);
     setStartDate('');
     setEndDate('');
+    fetchDocs('');
   };
 
   const formatFileSize = (bytes: number) => {
@@ -1302,7 +1312,7 @@ export default function App() {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       setShowSuggestions(false);
-                      fetchDocs();
+                      fetchDocs(searchQuery);
                     }
                   }}
                   className="w-full bg-[#1e293b] border border-slate-700 focus:border-cyan-500 rounded-xl pl-10 pr-4 py-2.5 text-xs text-white outline-none transition"
@@ -1344,7 +1354,7 @@ export default function App() {
               <button
                 onClick={() => {
                   setShowSuggestions(false);
-                  fetchDocs();
+                  fetchDocs(searchQuery);
                 }}
                 className="px-4 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl text-xs font-medium transition"
               >
