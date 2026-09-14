@@ -430,7 +430,6 @@ def create_user(req: CreateUserRequest):
         cur.close()
         conn.close()
 
-# ⭐️ เพิ่มฟังก์ชันลบผู้ใช้งาน (Delete User Endpoint)
 @app.delete("/api/users/{user_id}")
 def delete_user(user_id: int, current_username: Optional[str] = Query("admin")):
     conn = get_db_connection()
@@ -772,12 +771,15 @@ def get_document_versions(document_id: str):
         cur.close()
         conn.close()
 
+# ⭐️ ปรับปรุง Bulk Upload ให้รองรับ code_prefix และ document_date พร้อมรันลำดับ 001, 002...
 @app.post("/api/documents/bulk-upload")
 async def bulk_upload_documents(
     category_id: int = Form(1),
     department_id: int = Form(1),
     branch_id: int = Form(1),
     tags: str = Form(""),
+    code_prefix: str = Form("DOC-"),
+    document_date: Optional[date] = Form(None),
     username: str = Form("admin"),
     files: List[UploadFile] = File(...)
 ):
@@ -785,8 +787,37 @@ async def bulk_upload_documents(
     cur = conn.cursor(cursor_factory=RealDictCursor)
     uploaded_docs = []
     skipped_count = 0
+    today = document_date or date.today()
+    prefix = code_prefix.strip() or "DOC-"
+    if not prefix.endswith("-") and not prefix.endswith("/"):
+        prefix += "-"
+
     try:
-        for idx, file in enumerate(files):
+        # 🔍 1. ค้นหาในฐานข้อมูลว่า Prefix นี้เคยรันเลขไปถึงเท่าไหร่แล้ว
+        cur.execute(
+            """
+            SELECT document_code 
+            FROM documents 
+            WHERE document_code LIKE %s;
+            """,
+            (f"{prefix}%",)
+        )
+        existing_codes = cur.fetchall() or []
+        
+        max_seq = 0
+        for row in existing_codes:
+            code_str = row["document_code"]
+            # ดึงเฉพาะตัวเลขที่อยู่ท้าย Prefix ออกมา
+            suffix = code_str[len(prefix):]
+            if suffix.isdigit():
+                num = int(suffix)
+                if num > max_seq:
+                    max_seq = num
+
+        # 🔍 2. เริ่มรันเลขต่อจากค่าสูงสุดที่เคยมี (เช่น เดิมมี 4 -> เริ่มที่ 5)
+        current_seq = max_seq
+
+        for file in files:
             file_bytes = await file.read()
             file_hash = calculate_sha256(file_bytes)
 
@@ -795,13 +826,14 @@ async def bulk_upload_documents(
                 skipped_count += 1
                 continue
 
+            current_seq += 1
             unique_file_name = f"{uuid.uuid4()}_{file.filename}"
             mime_type = file.content_type or "application/octet-stream"
-            
             storage_key = upload_file_to_minio(file_bytes, unique_file_name, mime_type)
-            doc_code = f"DOC-{int(datetime.utcnow().timestamp()) + idx}"
+            
+            # ออกรหัสรันต่อจากเลขล่าสุด ไม่ซ้ำ 100%
+            doc_code = f"{prefix}{str(current_seq).zfill(3)}"
             doc_title = os.path.splitext(file.filename)[0]
-            today = date.today()
 
             cur.execute(
                 """
@@ -826,7 +858,7 @@ async def bulk_upload_documents(
             except Exception:
                 pass
             
-            record_audit_log(username, "BULK_UPLOAD", doc_id, f"Bulk uploaded: {file.filename}")
+            record_audit_log(username, "BULK_UPLOAD", doc_id, f"Bulk uploaded: {file.filename} ({doc_code})")
             process_document_ocr.delay(doc_id, storage_key, file.filename)
 
         conn.commit()
@@ -968,7 +1000,7 @@ def search_documents(
             LEFT JOIN branches b ON d.branch_id = b.id
             LEFT JOIN document_extractions de ON d.id = de.document_id
             {where_clause}
-            ORDER BY d.created_at DESC;
+            ORDER BY d.document_date DESC, d.document_code ASC;
         """
         cur.execute(query_str, tuple(params))
         results = cur.fetchall() or []
