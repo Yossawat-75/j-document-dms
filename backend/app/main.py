@@ -8,13 +8,14 @@ import json
 import hashlib
 import asyncio
 import mimetypes
+import urllib.request
 import urllib.parse
 import jwt
 import redis
 from datetime import date, datetime, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
@@ -42,6 +43,14 @@ JWT_ALGORITHM = "HS256"
 BUCKET_NAME = getattr(settings, "MINIO_BUCKET_NAME", getattr(settings, "MINIO_BUCKET", "dms-documents"))
 SCANNER_INBOX_DIR = "/app/scanner_inbox"
 REDIS_URL = getattr(settings, "REDIS_URL", "redis://redis:6379/0")
+
+# OAuth Credentials
+GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "Ov23liLfDAG5oh8JAw9k")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "d833d3490bed807e7207b7ba14b311da224e2886")
+
+MS_CLIENT_ID = os.getenv("MS_CLIENT_ID", "")
+MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET", "")
+MS_TENANT_ID = os.getenv("MS_TENANT_ID", "common")
 
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -89,6 +98,9 @@ def init_db_schema():
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS structured_data jsonb;")
+        # ตรวจสอบและเพิ่มคอลัมน์ใหม่อัตโนมัติ
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS department_id integer REFERENCES departments(id);")
+        cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS view_count integer DEFAULT 0;")
         conn.commit()
         cur.close()
         conn.close()
@@ -144,8 +156,8 @@ async def watch_scanner_folder():
                         cur = conn.cursor(cursor_factory=RealDictCursor)
                         cur.execute(
                             """
-                            INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status)
-                            VALUES (%s, %s, %s, 1, 1, 1, %s, %s, %s, %s, %s, 1, 'PROCESSING')
+                            INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status, view_count)
+                            VALUES (%s, %s, %s, 1, 1, 1, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0)
                             RETURNING id;
                             """,
                             (doc_title, doc_code, today, file_name, file_hash, mime_type, BUCKET_NAME, storage_key)
@@ -201,12 +213,21 @@ class CreateUserRequest(BaseModel):
     password: str
     full_name: str
     role: str = "USER"
+    department_id: Optional[int] = 1
+
+class UpdateUserRequest(BaseModel):
+    full_name: str
+    role: str = "USER"
+    department_id: Optional[int] = None
+    password: Optional[str] = None
 
 class BulkDeleteRequest(BaseModel):
     document_ids: List[str]
     username: Optional[str] = "admin"
 
-# 1. Auth Endpoints
+# ==========================================
+# 1. AUTH & OAUTH ENDPOINTS
+# ==========================================
 @app.post("/api/auth/login")
 def login(req: LoginRequest):
     conn = get_db_connection()
@@ -241,7 +262,134 @@ def login(req: LoginRequest):
         cur.close()
         conn.close()
 
-# 2. Master Meta Options & Smart Search Suggestions
+# GitHub OAuth
+@app.get("/api/auth/github")
+def login_github():
+    if GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
+        redirect_uri = "http://localhost:8000/api/auth/github/callback"
+        return RedirectResponse(f"https://github.com/login/oauth/authorize?client_id={GITHUB_CLIENT_ID}&redirect_uri={redirect_uri}&scope=read:user,user:email")
+    return RedirectResponse("http://localhost:8000/api/auth/oauth/mock-direct?provider=github")
+
+@app.get("/api/auth/github/callback")
+def github_callback(code: str):
+    token_url = "https://github.com/login/oauth/access_token"
+    data = urllib.parse.urlencode({
+        "client_id": GITHUB_CLIENT_ID,
+        "client_secret": GITHUB_CLIENT_SECRET,
+        "code": code
+    }).encode("utf-8")
+    
+    req = urllib.request.Request(token_url, data=data, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            token_data = json.loads(resp.read().decode())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"ไม่สามารถเชื่อมต่อกับ GitHub ได้: {str(e)}")
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="ไม่ได้รับ Access Token จาก GitHub")
+
+    user_req = urllib.request.Request("https://api.github.com/user", headers={
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "J-Document-DMS"
+    })
+    with urllib.request.urlopen(user_req) as resp:
+        gh_user = json.loads(resp.read().decode())
+
+    username = f"gh_{gh_user.get('login')}"
+    full_name = gh_user.get('name') or gh_user.get('login')
+    return handle_oauth_user_session(username, full_name, "GitHub")
+
+# Microsoft Teams OAuth
+@app.get("/api/auth/microsoft")
+def login_microsoft():
+    if MS_CLIENT_ID and MS_CLIENT_SECRET:
+        redirect_uri = "http://localhost:8000/api/auth/microsoft/callback"
+        auth_url = f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/authorize?client_id={MS_CLIENT_ID}&response_type=code&redirect_uri={redirect_uri}&response_mode=query&scope=User.Read"
+        return RedirectResponse(auth_url)
+    return RedirectResponse("http://localhost:8000/api/auth/oauth/mock-direct?provider=microsoft")
+
+@app.get("/api/auth/microsoft/callback")
+def microsoft_callback(code: str):
+    token_url = f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/token"
+    data = urllib.parse.urlencode({
+        "client_id": MS_CLIENT_ID,
+        "client_secret": MS_CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": "http://localhost:8000/api/auth/microsoft/callback",
+        "grant_type": "authorization_code"
+    }).encode("utf-8")
+
+    req = urllib.request.Request(token_url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            token_data = json.loads(resp.read().decode())
+    except Exception:
+        raise HTTPException(status_code=400, detail="ไม่สามารถเชื่อมต่อกับ Microsoft ได้")
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="ไม่ได้รับ Access Token จาก Microsoft")
+
+    user_req = urllib.request.Request("https://graph.microsoft.com/v1.0/me", headers={
+        "Authorization": f"Bearer {access_token}"
+    })
+    with urllib.request.urlopen(user_req) as resp:
+        ms_user = json.loads(resp.read().decode())
+
+    username = f"ms_{ms_user.get('userPrincipalName', '').split('@')[0]}"
+    full_name = ms_user.get('displayName') or "Microsoft Member"
+    return handle_oauth_user_session(username, full_name, "Microsoft Teams")
+
+@app.get("/api/auth/oauth/mock-direct")
+def mock_oauth_direct(provider: str):
+    provider_name = "Microsoft Teams" if provider == "microsoft" else "GitHub"
+    username = f"{provider}_user"
+    full_name = f"{provider_name} Member"
+    return handle_oauth_user_session(username, full_name, provider_name)
+
+def handle_oauth_user_session(username: str, full_name: str, provider_name: str):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("SELECT * FROM users WHERE username = %s;", (username,))
+        user = cur.fetchone()
+        if not user:
+            cur.execute(
+                """
+                INSERT INTO users (username, password_hash, full_name, role, department_id)
+                VALUES (%s, %s, %s, 'USER', 1)
+                RETURNING id, username, full_name, role;
+                """,
+                (username, get_password_hash("oauth_secret_default_pass"), full_name)
+            )
+            user = cur.fetchone()
+            conn.commit()
+
+        payload = {
+            "user_id": user["id"],
+            "username": user["username"],
+            "role": user["role"],
+            "full_name": user["full_name"],
+            "exp": datetime.utcnow() + timedelta(hours=24)
+        }
+        token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+        record_audit_log(user["username"], "SSO_LOGIN", None, f"Logged in with {provider_name}")
+
+        user_data = urllib.parse.quote(json.dumps({
+            "id": user["id"],
+            "username": user["username"],
+            "full_name": user["full_name"],
+            "role": user["role"],
+            "token": token
+        }))
+        return RedirectResponse(f"http://localhost:3000?oauth_success={user_data}")
+    finally:
+        cur.close()
+        conn.close()
+
+# 2. Master Meta Options & Suggestions
 @app.get("/api/meta/options")
 def get_meta_options():
     cache_key = "dms:meta:options"
@@ -284,20 +432,10 @@ def get_search_suggestions(q: str = Query(..., min_length=1)):
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         query_like = f"%{q.strip()}%"
-        cur.execute(
-            """
-            SELECT DISTINCT title FROM documents WHERE title ILIKE %s LIMIT 5;
-            """,
-            (query_like,)
-        )
+        cur.execute("SELECT DISTINCT title FROM documents WHERE title ILIKE %s LIMIT 5;", (query_like,))
         titles = [r["title"] for r in cur.fetchall() or []]
 
-        cur.execute(
-            """
-            SELECT DISTINCT tags FROM documents WHERE tags ILIKE %s AND tags != '' LIMIT 5;
-            """,
-            (query_like,)
-        )
+        cur.execute("SELECT DISTINCT tags FROM documents WHERE tags ILIKE %s AND tags != '' LIMIT 5;", (query_like,))
         tag_rows = cur.fetchall() or []
         tags = set()
         for r in tag_rows:
@@ -393,13 +531,21 @@ def delete_branch(branch_id: int):
         cur.close()
         conn.close()
 
-# 3. User Management
+# 3. User Management (ดึงแผนก + แก้ไขผู้ใช้)
 @app.get("/api/users")
 def get_users():
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cur.execute("SELECT id, username, full_name, role, created_at FROM users ORDER BY id ASC;")
+        cur.execute(
+            """
+            SELECT u.id, u.username, u.full_name, u.role, u.department_id,
+                   COALESCE(d.name, 'ไม่ระบุ') as department_name, u.created_at 
+            FROM users u
+            LEFT JOIN departments d ON u.department_id = d.id
+            ORDER BY u.id ASC;
+            """
+        )
         users = cur.fetchall() or []
         return {"users": users}
     finally:
@@ -414,11 +560,11 @@ def create_user(req: CreateUserRequest):
         hashed_pwd = get_password_hash(req.password)
         cur.execute(
             """
-            INSERT INTO users (username, password_hash, full_name, role)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id, username, full_name, role;
+            INSERT INTO users (username, password_hash, full_name, role, department_id)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id, username, full_name, role, department_id;
             """,
-            (req.username, hashed_pwd, req.full_name, req.role.upper())
+            (req.username, hashed_pwd, req.full_name, req.role.upper(), req.department_id)
         )
         new_user = cur.fetchone()
         conn.commit()
@@ -426,6 +572,40 @@ def create_user(req: CreateUserRequest):
     except Exception:
         conn.rollback()
         raise HTTPException(status_code=400, detail="Username already exists")
+    finally:
+        cur.close()
+        conn.close()
+
+@app.put("/api/users/{user_id}")
+def update_user(user_id: int, req: UpdateUserRequest, current_username: Optional[str] = Query("admin")):
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        if req.password and req.password.strip():
+            hashed_pwd = get_password_hash(req.password.strip())
+            cur.execute(
+                """
+                UPDATE users 
+                SET full_name = %s, role = %s, department_id = %s, password_hash = %s
+                WHERE id = %s RETURNING id, username, full_name, role, department_id;
+                """,
+                (req.full_name, req.role.upper(), req.department_id, hashed_pwd, user_id)
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE users 
+                SET full_name = %s, role = %s, department_id = %s
+                WHERE id = %s RETURNING id, username, full_name, role, department_id;
+                """,
+                (req.full_name, req.role.upper(), req.department_id, user_id)
+            )
+        updated = cur.fetchone()
+        if not updated:
+            raise HTTPException(status_code=404, detail="User not found")
+        conn.commit()
+        record_audit_log(current_username, "UPDATE_USER", None, f"Updated user profile for {updated['username']}")
+        return updated
     finally:
         cur.close()
         conn.close()
@@ -467,7 +647,7 @@ def delete_user(user_id: int, current_username: Optional[str] = Query("admin")):
         cur.close()
         conn.close()
 
-# 4. Analytics & Graph Breakdown API (Redis Cached)
+# 4. Analytics Stats
 @app.get("/api/analytics/stats")
 def get_dashboard_stats():
     cache_key = "dms:stats:dashboard"
@@ -576,7 +756,7 @@ def get_audit_logs(limit: int = 50):
         cur.close()
         conn.close()
 
-# 6. Document Storage & Operations
+# 6. Document Operations (View Counter)
 @app.get("/api/documents/export")
 def export_documents_csv():
     conn = get_db_connection()
@@ -658,8 +838,8 @@ async def upload_document(
 
         cur.execute(
             """
-            INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, tags, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 'PROCESSING')
+            INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, tags, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status, view_count)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0)
             RETURNING id, title, document_code, status;
             """,
             (title, document_code, document_date, category_id, department_id, branch_id, tags, file.filename, file_hash, mime_type, BUCKET_NAME, storage_key)
@@ -771,7 +951,7 @@ def get_document_versions(document_id: str):
         cur.close()
         conn.close()
 
-# ⭐️ ปรับปรุง Bulk Upload ให้รองรับ code_prefix และ document_date พร้อมรันลำดับ 001, 002...
+# Bulk Upload พร้อม Smart Auto-Increment
 @app.post("/api/documents/bulk-upload")
 async def bulk_upload_documents(
     category_id: int = Form(1),
@@ -793,7 +973,6 @@ async def bulk_upload_documents(
         prefix += "-"
 
     try:
-        # 🔍 1. ค้นหาในฐานข้อมูลว่า Prefix นี้เคยรันเลขไปถึงเท่าไหร่แล้ว
         cur.execute(
             """
             SELECT document_code 
@@ -807,14 +986,12 @@ async def bulk_upload_documents(
         max_seq = 0
         for row in existing_codes:
             code_str = row["document_code"]
-            # ดึงเฉพาะตัวเลขที่อยู่ท้าย Prefix ออกมา
             suffix = code_str[len(prefix):]
             if suffix.isdigit():
                 num = int(suffix)
                 if num > max_seq:
                     max_seq = num
 
-        # 🔍 2. เริ่มรันเลขต่อจากค่าสูงสุดที่เคยมี (เช่น เดิมมี 4 -> เริ่มที่ 5)
         current_seq = max_seq
 
         for file in files:
@@ -831,14 +1008,13 @@ async def bulk_upload_documents(
             mime_type = file.content_type or "application/octet-stream"
             storage_key = upload_file_to_minio(file_bytes, unique_file_name, mime_type)
             
-            # ออกรหัสรันต่อจากเลขล่าสุด ไม่ซ้ำ 100%
             doc_code = f"{prefix}{str(current_seq).zfill(3)}"
             doc_title = os.path.splitext(file.filename)[0]
 
             cur.execute(
                 """
-                INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, tags, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 'PROCESSING')
+                INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, tags, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status, view_count)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0)
                 RETURNING id, title, document_code, status;
                 """,
                 (doc_title, doc_code, today, category_id, department_id, branch_id, tags, file.filename, file_hash, mime_type, BUCKET_NAME, storage_key)
@@ -989,6 +1165,7 @@ def search_documents(
         query_str = f"""
             SELECT d.id, d.title, d.document_code, d.document_date, d.status, d.file_name,
                    COALESCE(d.current_version, 1) as current_version,
+                   COALESCE(d.view_count, 0) as view_count,
                    COALESCE(d.tags, '') as tags, d.created_at,
                    COALESCE(c.name, 'ทั่วไป') as category_name, 
                    COALESCE(dep.name, 'ทั่วไป') as department_name, 
@@ -1016,6 +1193,7 @@ def search_documents(
                 "status": r["status"],
                 "file_name": r["file_name"],
                 "current_version": r.get("current_version", 1),
+                "view_count": r.get("view_count", 0),
                 "tags": r["tags"] or "",
                 "category_name": r["category_name"],
                 "department_name": r["department_name"],
@@ -1036,15 +1214,31 @@ def search_documents(
         cur.close()
         conn.close()
 
+# ⭐️ เมื่อกดเปิดดูเอกสาร จะเพิ่ม view_count ทันที ⭐️
 @app.get("/api/documents/{document_id}")
 def get_document_detail(document_id: str, username: Optional[str] = Query("system")):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        # บวก view_count เพิ่ม 1 ทันทีที่มีการเรียกดู
+        cur.execute(
+            """
+            UPDATE documents 
+            SET view_count = COALESCE(view_count, 0) + 1 
+            WHERE id = %s 
+            RETURNING view_count;
+            """,
+            (document_id,)
+        )
+        cnt_row = cur.fetchone()
+        current_view_count = cnt_row["view_count"] if cnt_row else 1
+        conn.commit()
+
         cur.execute(
             """
             SELECT d.id, d.document_code, d.title, d.document_date, d.status, d.file_name, d.mime_type,
                    COALESCE(d.current_version, 1) as current_version,
+                   COALESCE(d.view_count, 1) as view_count,
                    COALESCE(d.tags, '') as tags,
                    COALESCE(c.name, 'ทั่วไป') as category_name, 
                    COALESCE(dep.name, 'ทั่วไป') as department_name, 
@@ -1068,7 +1262,7 @@ def get_document_detail(document_id: str, username: Optional[str] = Query("syste
         structured_data = extract_structured_json(raw_text)
         download_url = f"http://localhost:8000/api/documents/{doc['id']}/file"
 
-        record_audit_log(username, "VIEW", str(doc["id"]), f"Inspected document {doc['document_code']}")
+        record_audit_log(username, "VIEW", str(doc["id"]), f"Inspected document {doc['document_code']} (Total Views: {current_view_count})")
 
         return {
             "id": str(doc["id"]),
@@ -1076,6 +1270,7 @@ def get_document_detail(document_id: str, username: Optional[str] = Query("syste
             "title": doc["title"],
             "status": doc["status"],
             "current_version": doc.get("current_version", 1),
+            "view_count": current_view_count,
             "document_date": str(doc["document_date"]),
             "category_name": doc["category_name"],
             "department_name": doc["department_name"],

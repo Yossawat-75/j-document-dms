@@ -24,6 +24,8 @@ interface User {
   username: string;
   full_name: string;
   role: string;
+  department_id?: number;
+  department_name?: string;
 }
 
 interface DocItem {
@@ -34,6 +36,7 @@ interface DocItem {
   status: string;
   file_name: string;
   current_version?: number;
+  view_count?: number;
   category_name: string;
   department_name: string;
   branch_name: string;
@@ -59,6 +62,7 @@ interface DocDetail {
   document_date: string;
   status: string;
   current_version?: number;
+  view_count?: number;
   file_name: string;
   category_name: string;
   department_name: string;
@@ -80,6 +84,21 @@ export default function App() {
     const saved = localStorage.getItem('dms_user');
     return saved ? JSON.parse(saved) : null;
   });
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oauthData = params.get('oauth_success');
+    if (oauthData) {
+      try {
+        const userObj = JSON.parse(decodeURIComponent(oauthData));
+        localStorage.setItem('dms_user', JSON.stringify(userObj));
+        setCurrentUser(userObj);
+        window.history.replaceState({}, document.title, window.location.pathname);
+      } catch (err) {
+        console.error('Failed to parse OAuth session', err);
+      }
+    }
+  }, []);
 
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     const savedTheme = localStorage.getItem('dms_theme');
@@ -130,7 +149,7 @@ export default function App() {
   const [isBulk, setIsBulk] = useState(false);
   const [uploadTitle, setUploadTitle] = useState('');
   const [uploadCode, setUploadCode] = useState(`DOC-${Math.floor(1000 + Math.random() * 9000)}`);
-  const [bulkCodePrefix, setBulkCodePrefix] = useState('DOC-'); // ⭐️ สำหรับกำหนดคำนำหน้ารหัสชุด เช่น HW-, PO-
+  const [bulkCodePrefix, setBulkCodePrefix] = useState('DOC-');
   const [uploadDate, setUploadDate] = useState(new Date().toISOString().split('T')[0]);
   const [uploadCatId, setUploadCatId] = useState(1);
   const [uploadDeptId, setUploadDeptId] = useState(1);
@@ -183,6 +202,15 @@ export default function App() {
   const [newPassword, setNewPassword] = useState('');
   const [newFullName, setNewFullName] = useState('');
   const [newRole, setNewRole] = useState('USER');
+  const [newUserDeptId, setNewUserDeptId] = useState<number>(1);
+
+  // State สำหรับแก้ไขผู้ใช้ (Edit User)
+  const [editingUser, setEditingUser] = useState<any | null>(null);
+  const [editFullName, setEditFullName] = useState('');
+  const [editRole, setEditRole] = useState('USER');
+  const [editDeptId, setEditDeptId] = useState<number>(1);
+  const [editPassword, setEditPassword] = useState('');
+
   const [showCategoryModal, setShowCategoryModal] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newDeptName, setNewDeptName] = useState('');
@@ -288,7 +316,10 @@ export default function App() {
       setDepartments(data.departments || []);
       setBranches(data.branches || []);
       if (data.categories?.length > 0) setUploadCatId(data.categories[0].id);
-      if (data.departments?.length > 0) setUploadDeptId(data.departments[0].id);
+      if (data.departments?.length > 0) {
+        setUploadDeptId(data.departments[0].id);
+        setNewUserDeptId(data.departments[0].id);
+      }
       if (data.branches?.length > 0) setUploadBranchId(data.branches[0].id);
     } catch (err) {
       console.error(err);
@@ -769,7 +800,8 @@ export default function App() {
           username: newUsername,
           password: newPassword,
           full_name: newFullName,
-          role: newRole
+          role: newRole,
+          department_id: newUserDeptId
         })
       });
       if (!res.ok) throw new Error('ไม่สามารถสร้างผู้ใช้ได้ (Username ซ้ำ)');
@@ -777,10 +809,42 @@ export default function App() {
       setNewPassword('');
       setNewFullName('');
       openUserManagement();
-      showToast('เพิ่มผู้ใช้งานใหม่เรียบร้อย (Bcrypt Secured)');
+      showToast('เพิ่มผู้ใช้งานใหม่เรียบร้อย');
     } catch (err: any) {
       alert(err.message);
     }
+  };
+
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    try {
+      const res = await fetch(`${API_BASE}/users/${editingUser.id}?current_username=${currentUser?.username}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          full_name: editFullName,
+          role: editRole,
+          department_id: editDeptId,
+          password: editPassword || undefined
+        })
+      });
+      if (!res.ok) throw new Error('บันทึกการแก้ไขไม่สำเร็จ');
+      setEditingUser(null);
+      setEditPassword('');
+      openUserManagement();
+      showToast('แก้ไขข้อมูลผู้ใช้เรียบร้อย');
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  const startEditUser = (u: any) => {
+    setEditingUser(u);
+    setEditFullName(u.full_name);
+    setEditRole(u.role);
+    setEditDeptId(u.department_id || (departments[0]?.id || 1));
+    setEditPassword('');
   };
 
   const handleDeleteUser = async (userId: number, targetUsername: string) => {
@@ -939,6 +1003,50 @@ export default function App() {
               <LogOut className="w-4 h-4 rotate-180" /> เข้าสู่ระบบ
             </button>
           </form>
+
+          {/* เส้นคั่นตัวเลือก Single Sign-On */}
+          <div className="relative my-6 text-center">
+            <div className={`absolute inset-0 flex items-center ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
+              <div className="w-full border-t border-slate-700/60"></div>
+            </div>
+            <span className={`relative px-3 text-[11px] uppercase tracking-wider ${isDark ? 'bg-[#0f172a] text-slate-500' : 'bg-white text-slate-400'}`}>
+              หรือเข้าสู่ระบบด้วย
+            </span>
+          </div>
+
+          {/* ลิงก์ตรงไปยัง OAuth ของ Backend */}
+          <div className="space-y-2.5">
+            <a
+              href="http://localhost:8000/api/auth/microsoft"
+              className={`w-full py-2.5 px-4 rounded-xl border flex items-center justify-center gap-3 text-xs font-semibold transition shadow-sm ${
+                isDark 
+                  ? 'bg-[#182338] hover:bg-[#202e49] border-indigo-500/40 text-indigo-200' 
+                  : 'bg-indigo-50 hover:bg-indigo-100/80 border-indigo-200 text-indigo-800'
+              }`}
+            >
+              <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none">
+                <path d="M11 11H1V1H11V11Z" fill="#F25022"/>
+                <path d="M23 11H13V1H23V11Z" fill="#7FBA00"/>
+                <path d="M11 23H1V13H11V23Z" fill="#00A4EF"/>
+                <path d="M23 23H13V13H23V23Z" fill="#FFB900"/>
+              </svg>
+              <span>เข้าสู่ระบบด้วย Microsoft Teams</span>
+            </a>
+
+            <a
+              href="http://localhost:8000/api/auth/github"
+              className={`w-full py-2.5 px-4 rounded-xl border flex items-center justify-center gap-3 text-xs font-semibold transition shadow-sm ${
+                isDark 
+                  ? 'bg-[#171e2e] hover:bg-[#1e273b] border-slate-700 text-slate-200' 
+                  : 'bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-800'
+              }`}
+            >
+              <svg className="w-4 h-4 fill-current shrink-0" viewBox="0 0 24 24">
+                <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
+              </svg>
+              <span>เข้าสู่ระบบด้วย GitHub</span>
+            </a>
+          </div>
         </div>
       </div>
     );
@@ -1140,7 +1248,6 @@ export default function App() {
                   </div>
                 </>
               ) : (
-                /* ⭐️ เพิ่มช่องกำหนดรหัสชุดและวันที่สำหรับ Bulk Upload ⭐️ */
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className={`text-[11px] block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
@@ -1292,7 +1399,6 @@ export default function App() {
                 </button>
               </div>
 
-              {/* ส่วนพรีวิวโหมดอัปโหลดเดี่ยว */}
               {!isBulk && selectedSingleFile && previewBlobUrl && (
                 <div className="space-y-2">
                   <div className={`p-2.5 border rounded-xl flex items-center justify-between ${isDark ? 'bg-slate-900/80 border-cyan-500/30' : 'bg-slate-100 border-slate-200'}`}>
@@ -1339,7 +1445,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* ส่วนแสดงรายการไฟล์ในโหมด Bulk Upload */}
               {isBulk && bulkFiles.length > 0 && (
                 <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
                   <div className="text-[11px] font-semibold text-cyan-500 flex items-center justify-between">
@@ -1694,7 +1799,7 @@ export default function App() {
         </div>
       </main>
 
-      {/* 🔍 MODAL ขยายพรีวิวไฟล์เดี่ยวเต็มจอ */}
+      {/* MODAL พรีวิวไฟล์เดี่ยว */}
       {showFullPreviewModal && previewBlobUrl && selectedSingleFile && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
           <div className={`w-full max-w-5xl h-[88vh] border rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 ${isDark ? 'bg-[#0f172a] border-cyan-500/30' : 'bg-white border-slate-200'}`}>
@@ -1729,7 +1834,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 🔍 MODAL พรีวิวไฟล์ใน Bulk Upload */}
+      {/* MODAL พรีวิวไฟล์ Bulk */}
       {previewModalFile && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
           <div className={`w-full max-w-5xl h-[88vh] border rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 ${isDark ? 'bg-[#0f172a] border-cyan-500/30' : 'bg-white border-slate-200'}`}>
@@ -1890,7 +1995,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Inspector Modal */}
+      {/* Inspector Modal (พร้อมตัวนับยอดการเข้าชม View Counter) */}
       {activeDoc && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className={`w-full max-w-6xl border rounded-2xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden animate-in fade-in zoom-in-95 duration-200 ${isDark ? 'bg-[#0f172a] border-cyan-500/30' : 'bg-white border-slate-200'}`}>
@@ -1900,6 +2005,11 @@ export default function App() {
                   <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{activeDoc.title}</h3>
                   <span className={`px-2 py-0.5 border rounded-md text-[10px] font-mono font-bold ${isDark ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : 'bg-cyan-100 text-cyan-800 border-cyan-200'}`}>
                     v{activeDoc.current_version || 1}
+                  </span>
+
+                  {/* ⭐️ Badge แสดงจำนวนครั้งที่เปิดดูเอกสาร ⭐️ */}
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-medium flex items-center gap-1 border ${isDark ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30' : 'bg-indigo-50 text-indigo-700 border-indigo-200'}`}>
+                    <Eye className="w-3 h-3 text-indigo-500" /> เปิดดูแล้ว {activeDoc.view_count || 1} ครั้ง
                   </span>
                 </div>
                 <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
@@ -2244,62 +2354,121 @@ export default function App() {
         </div>
       )}
 
-      {/* User Management Modal */}
+      {/* User Management Modal (พร้อมเลือกแผนก และแก้ไขผู้ใช้) */}
       {showUserModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className={`w-full max-w-2xl border rounded-2xl shadow-2xl p-6 flex flex-col max-h-[85vh] ${isDark ? 'bg-[#0f172a] border-slate-800' : 'bg-white border-slate-200'}`}>
+          <div className={`w-full max-w-3xl border rounded-2xl shadow-2xl p-6 flex flex-col max-h-[85vh] ${isDark ? 'bg-[#0f172a] border-slate-800' : 'bg-white border-slate-200'}`}>
             <div className={`flex items-center justify-between border-b pb-3 mb-4 ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
               <div className="flex items-center gap-2">
                 <Users className="w-5 h-5 text-indigo-500" />
                 <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>จัดการผู้ใช้งาน (User Management)</h3>
               </div>
-              <button onClick={() => setShowUserModal(false)} className="text-slate-400 hover:text-slate-600">
+              <button onClick={() => { setShowUserModal(false); setEditingUser(null); }} className="text-slate-400 hover:text-slate-600">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleCreateUser} className={`grid grid-cols-2 gap-3 mb-4 p-3 rounded-xl border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-              <input
-                type="text"
-                placeholder="Username"
-                value={newUsername}
-                onChange={(e) => setNewUsername(e.target.value)}
-                className={`border rounded-lg px-3 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
-                required
-              />
-              <input
-                type="password"
-                placeholder="Password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                className={`border rounded-lg px-3 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
-                required
-              />
-              <input
-                type="text"
-                placeholder="ชื่อ-นามสกุล"
-                value={newFullName}
-                onChange={(e) => setNewFullName(e.target.value)}
-                className={`border rounded-lg px-3 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
-                required
-              />
-              <div className="flex gap-2">
+            {/* ฟอร์ม: สลับระหว่าง "เพิ่มผู้ใช้" กับ "แก้ไขผู้ใช้" */}
+            {editingUser ? (
+              <form onSubmit={handleUpdateUser} className={`p-4 rounded-xl border mb-4 space-y-3 ${isDark ? 'bg-indigo-950/20 border-indigo-500/40' : 'bg-indigo-50/50 border-indigo-200'}`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-indigo-500 flex items-center gap-1.5">
+                    <Edit3 className="w-3.5 h-3.5" /> แก้ไขข้อมูล: {editingUser.username}
+                  </span>
+                  <button type="button" onClick={() => setEditingUser(null)} className="text-[11px] text-slate-400 hover:underline">
+                    ยกเลิกการแก้ไข
+                  </button>
+                </div>
+                <div className="grid grid-cols-4 gap-2.5">
+                  <input
+                    type="text"
+                    placeholder="ชื่อ-นามสกุล"
+                    value={editFullName}
+                    onChange={(e) => setEditFullName(e.target.value)}
+                    className={`border rounded-lg px-3 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                    required
+                  />
+                  <select
+                    value={editDeptId}
+                    onChange={(e) => setEditDeptId(Number(e.target.value))}
+                    className={`border rounded-lg px-2 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                  >
+                    {departments.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value)}
+                    className={`border rounded-lg px-2 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                  >
+                    <option value="USER">USER</option>
+                    <option value="ADMIN">ADMIN</option>
+                  </select>
+                  <input
+                    type="password"
+                    placeholder="รหัสผ่านใหม่ (เว้นว่างได้)"
+                    value={editPassword}
+                    onChange={(e) => setEditPassword(e.target.value)}
+                    className={`border rounded-lg px-3 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <button type="submit" className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shadow">
+                    บันทึกการแก้ไข
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleCreateUser} className={`grid grid-cols-5 gap-2 mb-4 p-3 rounded-xl border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                <input
+                  type="text"
+                  placeholder="Username"
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  className={`border rounded-lg px-2.5 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                  required
+                />
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className={`border rounded-lg px-2.5 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                  required
+                />
+                <input
+                  type="text"
+                  placeholder="ชื่อ-นามสกุล"
+                  value={newFullName}
+                  onChange={(e) => setNewFullName(e.target.value)}
+                  className={`border rounded-lg px-2.5 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                  required
+                />
                 <select
-                  value={newRole}
-                  onChange={(e) => setNewRole(e.target.value)}
-                  className={`border rounded-lg px-3 py-1.5 text-xs outline-none flex-1 ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                  value={newUserDeptId}
+                  onChange={(e) => setNewUserDeptId(Number(e.target.value))}
+                  className={`border rounded-lg px-2 py-1.5 text-xs outline-none ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
                 >
-                  <option value="USER">USER</option>
-                  <option value="ADMIN">ADMIN</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>{d.name}</option>
+                  ))}
                 </select>
-                <button
-                  type="submit"
-                  className="px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold"
-                >
-                  เพิ่มผู้ใช้
-                </button>
-              </div>
-            </form>
+                <div className="flex gap-1.5">
+                  <select
+                    value={newRole}
+                    onChange={(e) => setNewRole(e.target.value)}
+                    className={`border rounded-lg px-1.5 py-1.5 text-xs outline-none flex-1 ${isDark ? 'bg-[#1e293b] border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                  >
+                    <option value="USER">USER</option>
+                    <option value="ADMIN">ADMIN</option>
+                  </select>
+                  <button type="submit" className="px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold shrink-0">
+                    เพิ่ม
+                  </button>
+                </div>
+              </form>
+            )}
 
             <div className="overflow-y-auto flex-1">
               <table className={`w-full text-left text-xs ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
@@ -2307,6 +2476,7 @@ export default function App() {
                   <tr>
                     <th className="py-2 px-3">Username</th>
                     <th className="py-2 px-3">ชื่อ-นามสกุล</th>
+                    <th className="py-2 px-3">แผนก</th>
                     <th className="py-2 px-3">Role</th>
                     <th className="py-2 px-3 text-right">จัดการ</th>
                   </tr>
@@ -2316,22 +2486,33 @@ export default function App() {
                     <tr key={u.id} className={`transition ${isDark ? 'hover:bg-slate-800/30' : 'hover:bg-slate-50'}`}>
                       <td className={`py-2.5 px-3 font-medium ${isDark ? 'text-white' : 'text-slate-900'}`}>{u.username}</td>
                       <td className="py-2.5 px-3">{u.full_name}</td>
+                      <td className="py-2.5 px-3 text-slate-400">{u.department_name || 'ไม่ระบุ'}</td>
                       <td className="py-2.5 px-3">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${u.role === 'ADMIN' ? 'bg-cyan-500/20 text-cyan-500' : isDark ? 'bg-slate-800 text-slate-400' : 'bg-slate-200 text-slate-600'}`}>
                           {u.role}
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        {u.username !== 'admin' && u.username !== currentUser?.username && (
+                        <div className="flex items-center justify-end gap-1.5">
                           <button
                             type="button"
-                            onClick={() => handleDeleteUser(u.id, u.username)}
-                            className="p-1 text-slate-400 hover:text-rose-500 transition"
-                            title={`ลบผู้ใช้ ${u.username}`}
+                            onClick={() => startEditUser(u)}
+                            className="p-1 text-slate-400 hover:text-indigo-400 transition"
+                            title="แก้ไขข้อมูลผู้ใช้"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Edit3 className="w-3.5 h-3.5" />
                           </button>
-                        )}
+                          {u.username !== 'admin' && u.username !== currentUser?.username && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteUser(u.id, u.username)}
+                              className="p-1 text-slate-400 hover:text-rose-500 transition"
+                              title={`ลบผู้ใช้ ${u.username}`}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
