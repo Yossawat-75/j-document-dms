@@ -98,9 +98,12 @@ def init_db_schema():
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS structured_data jsonb;")
-        # ตรวจสอบและเพิ่มคอลัมน์ใหม่อัตโนมัติ
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS department_id integer REFERENCES departments(id);")
         cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS view_count integer DEFAULT 0;")
+        cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_public boolean DEFAULT true;")
+        cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploader_username varchar(100);")
+        cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS allowed_department_ids integer[] DEFAULT '{}';")
+        cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS allowed_user_ids integer[] DEFAULT '{}';")
         conn.commit()
         cur.close()
         conn.close()
@@ -156,8 +159,8 @@ async def watch_scanner_folder():
                         cur = conn.cursor(cursor_factory=RealDictCursor)
                         cur.execute(
                             """
-                            INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status, view_count)
-                            VALUES (%s, %s, %s, 1, 1, 1, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0)
+                            INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status, view_count, is_public, uploader_username, allowed_department_ids)
+                            VALUES (%s, %s, %s, 1, 1, 1, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0, true, 'ScannerService', ARRAY[1])
                             RETURNING id;
                             """,
                             (doc_title, doc_code, today, file_name, file_hash, mime_type, BUCKET_NAME, storage_key)
@@ -243,6 +246,7 @@ def login(req: LoginRequest):
             "username": user["username"],
             "role": user["role"],
             "full_name": user["full_name"],
+            "department_id": user.get("department_id"),
             "exp": datetime.utcnow() + timedelta(hours=24)
         }
         token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -255,14 +259,14 @@ def login(req: LoginRequest):
                 "id": user["id"],
                 "username": user["username"],
                 "full_name": user["full_name"],
-                "role": user["role"]
+                "role": user["role"],
+                "department_id": user.get("department_id")
             }
         }
     finally:
         cur.close()
         conn.close()
 
-# GitHub OAuth
 @app.get("/api/auth/github")
 def login_github():
     if GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
@@ -301,7 +305,6 @@ def github_callback(code: str):
     full_name = gh_user.get('name') or gh_user.get('login')
     return handle_oauth_user_session(username, full_name, "GitHub")
 
-# Microsoft Teams OAuth
 @app.get("/api/auth/microsoft")
 def login_microsoft():
     if MS_CLIENT_ID and MS_CLIENT_SECRET:
@@ -360,7 +363,7 @@ def handle_oauth_user_session(username: str, full_name: str, provider_name: str)
                 """
                 INSERT INTO users (username, password_hash, full_name, role, department_id)
                 VALUES (%s, %s, %s, 'USER', 1)
-                RETURNING id, username, full_name, role;
+                RETURNING id, username, full_name, role, department_id;
                 """,
                 (username, get_password_hash("oauth_secret_default_pass"), full_name)
             )
@@ -372,6 +375,7 @@ def handle_oauth_user_session(username: str, full_name: str, provider_name: str)
             "username": user["username"],
             "role": user["role"],
             "full_name": user["full_name"],
+            "department_id": user.get("department_id"),
             "exp": datetime.utcnow() + timedelta(hours=24)
         }
         token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -382,6 +386,7 @@ def handle_oauth_user_session(username: str, full_name: str, provider_name: str)
             "username": user["username"],
             "full_name": user["full_name"],
             "role": user["role"],
+            "department_id": user.get("department_id"),
             "token": token
         }))
         return RedirectResponse(f"http://localhost:3000?oauth_success={user_data}")
@@ -531,7 +536,7 @@ def delete_branch(branch_id: int):
         cur.close()
         conn.close()
 
-# 3. User Management (ดึงแผนก + แก้ไขผู้ใช้)
+# 3. User Management
 @app.get("/api/users")
 def get_users():
     conn = get_db_connection()
@@ -756,7 +761,7 @@ def get_audit_logs(limit: int = 50):
         cur.close()
         conn.close()
 
-# 6. Document Operations (View Counter)
+# 6. Document Operations
 @app.get("/api/documents/export")
 def export_documents_csv():
     conn = get_db_connection()
@@ -815,9 +820,18 @@ async def upload_document(
     department_id: int = Form(1),
     branch_id: int = Form(1),
     tags: str = Form(""),
+    is_public: bool = Form(True),
+    allowed_departments: str = Form(""),
+    allowed_users: str = Form(""),
     username: str = Form("admin"),
     file: UploadFile = File(...)
 ):
+    allowed_dept_ids = [int(d.strip()) for d in allowed_departments.split(",") if d.strip().isdigit()]
+    allowed_user_ids = [int(u.strip()) for u in allowed_users.split(",") if u.strip().isdigit()]
+
+    if department_id not in allowed_dept_ids:
+        allowed_dept_ids.append(department_id)
+
     file_bytes = await file.read()
     file_hash = calculate_sha256(file_bytes)
 
@@ -838,11 +852,16 @@ async def upload_document(
 
         cur.execute(
             """
-            INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, tags, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status, view_count)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0)
+            INSERT INTO documents (
+                title, document_code, document_date, category_id, department_id, branch_id, 
+                tags, file_name, file_hash, mime_type, storage_bucket, storage_key, 
+                current_version, status, view_count, is_public, uploader_username, 
+                allowed_department_ids, allowed_user_ids
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0, %s, %s, %s, %s)
             RETURNING id, title, document_code, status;
             """,
-            (title, document_code, document_date, category_id, department_id, branch_id, tags, file.filename, file_hash, mime_type, BUCKET_NAME, storage_key)
+            (title, document_code, document_date, category_id, department_id, branch_id, tags, file.filename, file_hash, mime_type, BUCKET_NAME, storage_key, is_public, username, allowed_dept_ids, allowed_user_ids)
         )
         doc = cur.fetchone()
         doc_id = str(doc["id"])
@@ -859,7 +878,6 @@ async def upload_document(
             pass
 
         conn.commit()
-
         invalidate_cache()
         record_audit_log(username, "UPLOAD", doc_id, f"Uploaded: {file.filename} ({title}) [v1]")
         process_document_ocr.delay(doc_id, storage_key, file.filename)
@@ -916,7 +934,6 @@ async def upload_new_version(
             pass
 
         conn.commit()
-
         invalidate_cache()
         record_audit_log(username, "UPLOAD_NEW_VERSION", document_id, f"Uploaded new version v{new_version_num}: {file.filename}")
         process_document_ocr.delay(document_id, storage_key, file.filename)
@@ -951,7 +968,7 @@ def get_document_versions(document_id: str):
         cur.close()
         conn.close()
 
-# Bulk Upload พร้อม Smart Auto-Increment
+# ⭐️ Bulk Upload รองรับเลือกแผนกและรายบุคคล ⭐️
 @app.post("/api/documents/bulk-upload")
 async def bulk_upload_documents(
     category_id: int = Form(1),
@@ -960,9 +977,18 @@ async def bulk_upload_documents(
     tags: str = Form(""),
     code_prefix: str = Form("DOC-"),
     document_date: Optional[date] = Form(None),
+    is_public: bool = Form(True),
+    allowed_departments: str = Form(""),
+    allowed_users: str = Form(""),
     username: str = Form("admin"),
     files: List[UploadFile] = File(...)
 ):
+    allowed_dept_ids = [int(d.strip()) for d in allowed_departments.split(",") if d.strip().isdigit()]
+    allowed_user_ids = [int(u.strip()) for u in allowed_users.split(",") if u.strip().isdigit()]
+
+    if department_id not in allowed_dept_ids:
+        allowed_dept_ids.append(department_id)
+
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     uploaded_docs = []
@@ -973,14 +999,7 @@ async def bulk_upload_documents(
         prefix += "-"
 
     try:
-        cur.execute(
-            """
-            SELECT document_code 
-            FROM documents 
-            WHERE document_code LIKE %s;
-            """,
-            (f"{prefix}%",)
-        )
+        cur.execute("SELECT document_code FROM documents WHERE document_code LIKE %s;", (f"{prefix}%",))
         existing_codes = cur.fetchall() or []
         
         max_seq = 0
@@ -1013,11 +1032,16 @@ async def bulk_upload_documents(
 
             cur.execute(
                 """
-                INSERT INTO documents (title, document_code, document_date, category_id, department_id, branch_id, tags, file_name, file_hash, mime_type, storage_bucket, storage_key, current_version, status, view_count)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0)
+                INSERT INTO documents (
+                    title, document_code, document_date, category_id, department_id, branch_id, 
+                    tags, file_name, file_hash, mime_type, storage_bucket, storage_key, 
+                    current_version, status, view_count, is_public, uploader_username, 
+                    allowed_department_ids, allowed_user_ids
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 'PROCESSING', 0, %s, %s, %s, %s)
                 RETURNING id, title, document_code, status;
                 """,
-                (doc_title, doc_code, today, category_id, department_id, branch_id, tags, file.filename, file_hash, mime_type, BUCKET_NAME, storage_key)
+                (doc_title, doc_code, today, category_id, department_id, branch_id, tags, file.filename, file_hash, mime_type, BUCKET_NAME, storage_key, is_public, username, allowed_dept_ids, allowed_user_ids)
             )
             doc = cur.fetchone()
             doc_id = str(doc["id"])
@@ -1089,7 +1113,6 @@ def retry_document_ocr(document_id: str, username: Optional[str] = Query("system
             raise HTTPException(status_code=404, detail="Document not found")
 
         record_audit_log(username, "RETRY_OCR", document_id, f"Retrying OCR for {doc['document_code']}")
-        
         process_document_ocr(document_id, doc["storage_key"], doc["file_name"])
 
         cur.execute("SELECT raw_text FROM document_extractions WHERE document_id = %s;", (document_id,))
@@ -1112,6 +1135,7 @@ def retry_document_ocr(document_id: str, username: Optional[str] = Query("system
         cur.close()
         conn.close()
 
+# ค้นหาเอกสารพร้อมกรองสิทธิ์แผนก & รายบุคคล
 @app.get("/api/documents/search")
 def search_documents(
     q: Optional[str] = Query(None),
@@ -1119,21 +1143,32 @@ def search_documents(
     department_id: Optional[int] = Query(None),
     branch_id: Optional[int] = Query(None),
     start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
+    end_date: Optional[str] = Query(None),
+    current_username: Optional[str] = Query("admin")
 ):
-    cache_key = f"dms:search:{q}:{category_id}:{department_id}:{branch_id}:{start_date}:{end_date}"
-    try:
-        cached = redis_client.get(cache_key)
-        if cached:
-            return json.loads(cached)
-    except Exception:
-        pass
-
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
+        cur.execute("SELECT id, role, department_id FROM users WHERE username = %s;", (current_username,))
+        user_info = cur.fetchone()
+
         conditions = []
         params = []
+
+        if user_info and user_info["role"] != "ADMIN":
+            uid = user_info["id"]
+            user_dept = user_info["department_id"]
+            conditions.append(
+                """
+                (
+                    d.is_public = true 
+                    OR d.uploader_username = %s 
+                    OR (%s IS NOT NULL AND %s = ANY(COALESCE(d.allowed_department_ids, '{}')))
+                    OR (%s = ANY(COALESCE(d.allowed_user_ids, '{}')))
+                )
+                """
+            )
+            params.extend([current_username, user_dept, user_dept, uid])
 
         if q and q.strip():
             search_query = f"%{q.strip()}%"
@@ -1164,6 +1199,7 @@ def search_documents(
 
         query_str = f"""
             SELECT d.id, d.title, d.document_code, d.document_date, d.status, d.file_name,
+                   d.is_public, d.uploader_username,
                    COALESCE(d.current_version, 1) as current_version,
                    COALESCE(d.view_count, 0) as view_count,
                    COALESCE(d.tags, '') as tags, d.created_at,
@@ -1194,6 +1230,8 @@ def search_documents(
                 "file_name": r["file_name"],
                 "current_version": r.get("current_version", 1),
                 "view_count": r.get("view_count", 0),
+                "is_public": r.get("is_public", True),
+                "uploader_username": r.get("uploader_username") or "",
                 "tags": r["tags"] or "",
                 "category_name": r["category_name"],
                 "department_name": r["department_name"],
@@ -1201,44 +1239,26 @@ def search_documents(
                 "snippet": snippet
             })
         
-        final_data = {"results": clean_results}
-        try:
-            redis_client.setex(cache_key, 5, json.dumps(final_data))
-        except Exception:
-            pass
-
-        return final_data
-    except Exception:
-        return {"results": []}
+        return {"results": clean_results}
     finally:
         cur.close()
         conn.close()
 
-# ⭐️ เมื่อกดเปิดดูเอกสาร จะเพิ่ม view_count ทันที ⭐️
+# ดูรายละเอียดเอกสาร + ตรวจสอบสิทธิ์ + เพิ่ม View Counter
 @app.get("/api/documents/{document_id}")
 def get_document_detail(document_id: str, username: Optional[str] = Query("system")):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # บวก view_count เพิ่ม 1 ทันทีที่มีการเรียกดู
-        cur.execute(
-            """
-            UPDATE documents 
-            SET view_count = COALESCE(view_count, 0) + 1 
-            WHERE id = %s 
-            RETURNING view_count;
-            """,
-            (document_id,)
-        )
-        cnt_row = cur.fetchone()
-        current_view_count = cnt_row["view_count"] if cnt_row else 1
-        conn.commit()
+        cur.execute("SELECT id, role, department_id FROM users WHERE username = %s;", (username,))
+        user_info = cur.fetchone()
 
         cur.execute(
             """
             SELECT d.id, d.document_code, d.title, d.document_date, d.status, d.file_name, d.mime_type,
+                   d.is_public, d.uploader_username, d.department_id, d.allowed_department_ids, d.allowed_user_ids,
                    COALESCE(d.current_version, 1) as current_version,
-                   COALESCE(d.view_count, 1) as view_count,
+                   COALESCE(d.view_count, 0) as view_count,
                    COALESCE(d.tags, '') as tags,
                    COALESCE(c.name, 'ทั่วไป') as category_name, 
                    COALESCE(dep.name, 'ทั่วไป') as department_name, 
@@ -1254,6 +1274,30 @@ def get_document_detail(document_id: str, username: Optional[str] = Query("syste
         doc = cur.fetchone()
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
+
+        if user_info and user_info["role"] != "ADMIN":
+            user_dept = user_info["department_id"]
+            is_allowed = (
+                doc["is_public"] 
+                or doc["uploader_username"] == username 
+                or (user_dept and user_dept in (doc.get("allowed_department_ids") or []))
+                or (user_info["id"] in (doc.get("allowed_user_ids") or []))
+            )
+            if not is_allowed:
+                raise HTTPException(status_code=403, detail="คุณไม่มีสิทธิ์เข้าถึงเอกสารนี้ (จำกัดเฉพาะแผนกหรือบุคคลที่ได้รับอนุญาต)")
+
+        cur.execute(
+            """
+            UPDATE documents 
+            SET view_count = COALESCE(view_count, 0) + 1 
+            WHERE id = %s 
+            RETURNING view_count;
+            """,
+            (document_id,)
+        )
+        cnt_row = cur.fetchone()
+        current_view_count = cnt_row["view_count"] if cnt_row else (doc["view_count"] + 1)
+        conn.commit()
 
         cur.execute("SELECT raw_text FROM document_extractions WHERE document_id = %s LIMIT 1;", (document_id,))
         ext = cur.fetchone()
@@ -1271,6 +1315,9 @@ def get_document_detail(document_id: str, username: Optional[str] = Query("syste
             "status": doc["status"],
             "current_version": doc.get("current_version", 1),
             "view_count": current_view_count,
+            "is_public": doc.get("is_public", True),
+            "allowed_department_ids": doc.get("allowed_department_ids") or [],
+            "allowed_user_ids": doc.get("allowed_user_ids") or [],
             "document_date": str(doc["document_date"]),
             "category_name": doc["category_name"],
             "department_name": doc["department_name"],

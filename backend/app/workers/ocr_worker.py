@@ -6,7 +6,7 @@ import shutil
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 from celery import Celery
-from PIL import Image
+from PIL import Image, ImageEnhance
 import fitz  # PyMuPDF
 import pytesseract
 import redis
@@ -46,6 +46,16 @@ def invalidate_cache(pattern: str = "dms:*"):
 def get_db_connection():
     return psycopg2.connect(settings.DATABASE_URL)
 
+def preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
+    """ปรับภาพให้อ่านตัวหนังสือและสระไทยได้คมชัดขึ้น"""
+    gray = img.convert('L')
+    enhancer = ImageEnhance.Contrast(gray)
+    contrasted = enhancer.enhance(2.0)
+    threshold = 180
+    table = [0 if i < threshold else 255 for i in range(256)]
+    binary = contrasted.point(table, '1')
+    return binary
+
 def extract_structured_json(text: str) -> dict:
     tax = re.search(r'(?:tax|เลขประจำตัวผู้เสียภาษี|ผู้เสียภาษี)[:\s]*(\d{13}|\d{1}-\d{4}-\d{5}-\d{2}-\d{1})', text, re.IGNORECASE)
     doc_num = re.search(r'(?:เลขที่รายการ|เลขที่เอกสาร|เลขที่|no\.|invoice no|receipt no|doc no|ที่ อว\.)[:\s]*([a-zA-Z0-9\.\-\/]+)', text, re.IGNORECASE)
@@ -56,7 +66,6 @@ def extract_structured_json(text: str) -> dict:
 
     clean_amounts = []
 
-    # 1. ดักจับยอดเงินที่มีคีย์เวิร์ดนำหน้า (รองรับคำคั่นกลางและ Newlines)
     keyword_amounts = re.findall(
         r'(?:total|grand total|amount|net amount|รวมทั้งสิ้น|จำนวนเงินรวม|จำนวนเงินทั้งหมด|ยอดสุทธิ|จำนวนเงิน|ราคารวม|ค่าบำรุง|ค่าลงทะเบียน|เป็นเงิน|รวม|baht|บาท|thb|฿)[^\d\n\r]{0,30}[\:\s\=]*([0-9]{1,3}(?:,[0-9]{3})*\.\d{2})',
         text,
@@ -70,7 +79,6 @@ def extract_structured_json(text: str) -> dict:
         except Exception:
             pass
 
-    # 2. ดักจับตัวเลขที่มี Comma คั่นหลักพันและทศนิยม 2 ตำแหน่ง (เช่น 8,000.00) โดยไม่ติดเลขที่หนังสือ
     comma_amounts = re.findall(r'(?<![\d\.\-\/])([0-9]{1,3}(?:,[0-9]{3})+\.\d{2})(?![\d\.\-\/])', text)
     for a in comma_amounts:
         try:
@@ -82,7 +90,6 @@ def extract_structured_json(text: str) -> dict:
 
     grand_total = max(clean_amounts) if clean_amounts else None
 
-    # สรุปใจความเอกสารแบบย่อ
     summary_parts = []
     if org:
         summary_parts.append(f"หน่วยงาน/องค์กร: {org.group(0).strip()}")
@@ -161,27 +168,45 @@ def process_document_ocr(self, document_id: str, storage_key: str, file_name: st
         response.release_conn()
 
         extracted_text = ""
+
+        # ⭐️ สกัดข้อความตามตำแหน่งพิกัดจริงบนหน้ากระดาษ (Top-to-Bottom) ⭐️
         if file_name.lower().endswith('.pdf'):
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             full_text = []
+
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                txt = page.get_text()
-                try:
-                    pix = page.get_pixmap(dpi=200)
-                    raw_img = Image.open(io.BytesIO(pix.tobytes("png")))
-                    ocr_txt = pytesseract.image_to_string(raw_img, lang='tha+eng')
-                    if len(ocr_txt.strip()) > 20:
-                        txt = ocr_txt
-                except Exception:
-                    pass
-                if txt.strip():
-                    full_text.append(txt)
+                # ⭐️ ใส่ sort=True เพื่อเรียงลำดับพิกัดจากบนลงล่างตามสายตามนุษย์ ⭐️
+                direct_text = page.get_text("text", sort=True)
+
+                if len(direct_text.strip()) > 30:
+                    full_text.append(direct_text.strip())
+                else:
+                    try:
+                        pix = page.get_pixmap(dpi=300)
+                        raw_img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        clean_img = preprocess_image_for_ocr(raw_img)
+                        ocr_txt = pytesseract.image_to_string(
+                            clean_img, 
+                            lang='tha+eng', 
+                            config='--psm 3 --oem 1'
+                        )
+                        if ocr_txt.strip():
+                            full_text.append(ocr_txt.strip())
+                    except Exception:
+                        if direct_text.strip():
+                            full_text.append(direct_text.strip())
+
             extracted_text = "\n\n".join(full_text)
         else:
             try:
                 raw_img = Image.open(io.BytesIO(file_bytes))
-                extracted_text = pytesseract.image_to_string(raw_img, lang='tha+eng')
+                clean_img = preprocess_image_for_ocr(raw_img)
+                extracted_text = pytesseract.image_to_string(
+                    clean_img, 
+                    lang='tha+eng', 
+                    config='--psm 3 --oem 1'
+                )
             except Exception:
                 pass
 

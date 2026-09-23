@@ -3,10 +3,10 @@ import {
   FileText, Search, UploadCloud, Eye, Trash2, CheckCircle2, 
   Clock, AlertCircle, Download, FileSpreadsheet, History, LogOut, 
   DollarSign, Building2, UserCheck, Users, FolderPlus,
-  Edit3, Save, X, Copy, Check, FileDown, Layers, File,
+  Edit3, Save, X, Copy, Check, FileDown, Layers, File as FileIcon,
   Filter, RotateCcw, Tag, MapPin, Bell, RefreshCw, GitCommit, Upload,
   BarChart3, PieChart, Printer, CheckSquare, Square, Code, Sparkles,
-  Camera, SwitchCamera, ScanLine, Sun, Moon, Maximize2
+  Camera, SwitchCamera, ScanLine, Sun, Moon, Maximize2, Lock, ShieldCheck
 } from 'lucide-react';
 
 const API_BASE = "http://localhost:8000/api";
@@ -17,6 +17,23 @@ const getSafePreviewUrl = (url: string | undefined | null) => {
   return url
     .replace('http://localhost:8000', backendOrigin)
     .replace('http://127.0.0.1:8000', backendOrigin);
+};
+
+const getCategoryPrefix = (catName: string) => {
+  const n = (catName || '').toLowerCase();
+  if (n.includes('ใบเสร็จ') || n.includes('ใบกำกับ') || n.includes('tax') || n.includes('receipt') || n.includes('inv')) {
+    return 'INV-';
+  }
+  if (n.includes('สัญญา') || n.includes('contract')) {
+    return 'CNT-';
+  }
+  if (n.includes('สั่งซื้อ') || n.includes('po') || n.includes('purchase')) {
+    return 'PO-';
+  }
+  if (n.includes('ราชการ') || n.includes('ทางการ') || n.includes('gov')) {
+    return 'GOV-';
+  }
+  return 'DOC-';
 };
 
 interface User {
@@ -37,6 +54,8 @@ interface DocItem {
   file_name: string;
   current_version?: number;
   view_count?: number;
+  is_public?: boolean;
+  uploader_username?: string;
   category_name: string;
   department_name: string;
   branch_name: string;
@@ -63,6 +82,9 @@ interface DocDetail {
   status: string;
   current_version?: number;
   view_count?: number;
+  is_public?: boolean;
+  allowed_department_ids?: number[];
+  allowed_user_ids?: number[];
   file_name: string;
   category_name: string;
   department_name: string;
@@ -155,6 +177,11 @@ export default function App() {
   const [uploadDeptId, setUploadDeptId] = useState(1);
   const [uploadBranchId, setUploadBranchId] = useState(1);
   const [uploadTags, setUploadTags] = useState('');
+
+  const [uploadIsPublic, setUploadIsPublic] = useState(true);
+  const [uploadAllowedDepts, setUploadAllowedDepts] = useState<number[]>([]);
+  const [uploadAllowedUsers, setUploadAllowedUsers] = useState<number[]>([]);
+
   const [selectedSingleFile, setSelectedSingleFile] = useState<globalThis.File | null>(null);
   const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
   const [showFullPreviewModal, setShowFullPreviewModal] = useState(false);
@@ -204,7 +231,6 @@ export default function App() {
   const [newRole, setNewRole] = useState('USER');
   const [newUserDeptId, setNewUserDeptId] = useState<number>(1);
 
-  // State สำหรับแก้ไขผู้ใช้ (Edit User)
   const [editingUser, setEditingUser] = useState<any | null>(null);
   const [editFullName, setEditFullName] = useState('');
   const [editRole, setEditRole] = useState('USER');
@@ -271,7 +297,18 @@ export default function App() {
   const loadInitialData = async () => {
     fetchStats();
     fetchOptions();
+    fetchUsersQuick();
     fetchDocs();
+  };
+
+  const fetchUsersQuick = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/users`);
+      const data = await res.json();
+      setUsersList(data.users || []);
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -315,7 +352,13 @@ export default function App() {
       setCategories(data.categories || []);
       setDepartments(data.departments || []);
       setBranches(data.branches || []);
-      if (data.categories?.length > 0) setUploadCatId(data.categories[0].id);
+      if (data.categories?.length > 0) {
+        const firstCat = data.categories[0];
+        setUploadCatId(firstCat.id);
+        const initPrefix = getCategoryPrefix(firstCat.name);
+        setUploadCode(`${initPrefix}${Math.floor(1000 + Math.random() * 9000)}`);
+        setBulkCodePrefix(initPrefix);
+      }
       if (data.departments?.length > 0) {
         setUploadDeptId(data.departments[0].id);
         setNewUserDeptId(data.departments[0].id);
@@ -329,7 +372,7 @@ export default function App() {
   const fetchDocs = async (queryOverride?: string) => {
     try {
       const activeQuery = queryOverride !== undefined ? queryOverride : searchQueryRef.current;
-      let url = `${API_BASE}/documents/search?`;
+      let url = `${API_BASE}/documents/search?current_username=${encodeURIComponent(currentUser?.username || 'admin')}&`;
       if (activeQuery) url += `q=${encodeURIComponent(activeQuery)}&`;
       if (selectedCat) url += `category_id=${selectedCat}&`;
       if (selectedDept) url += `department_id=${selectedDept}&`;
@@ -575,6 +618,9 @@ export default function App() {
         formData.append('tags', uploadTags);
         formData.append('code_prefix', bulkCodePrefix);
         formData.append('document_date', uploadDate);
+        formData.append('is_public', uploadIsPublic ? 'true' : 'false');
+        formData.append('allowed_departments', uploadAllowedDepts.join(','));
+        formData.append('allowed_users', uploadAllowedUsers.join(','));
         formData.append('username', currentUser?.username || 'admin');
         bulkFiles.forEach((f) => {
           formData.append('files', f);
@@ -604,6 +650,9 @@ export default function App() {
         formData.append('department_id', uploadDeptId.toString());
         formData.append('branch_id', uploadBranchId.toString());
         formData.append('tags', uploadTags);
+        formData.append('is_public', uploadIsPublic ? 'true' : 'false');
+        formData.append('allowed_departments', uploadAllowedDepts.join(','));
+        formData.append('allowed_users', uploadAllowedUsers.join(','));
         formData.append('username', currentUser?.username || 'admin');
         formData.append('file', selectedSingleFile);
 
@@ -616,8 +665,14 @@ export default function App() {
         
         setUploadTitle('');
         setUploadTags('');
+        setUploadIsPublic(true);
+        setUploadAllowedDepts([]);
+        setUploadAllowedUsers([]);
         clearSingleFile();
-        setUploadCode(`DOC-${Math.floor(1000 + Math.random() * 9000)}`);
+        
+        const currentCat = categories.find((c) => c.id === uploadCatId);
+        const prefix = currentCat ? getCategoryPrefix(currentCat.name) : 'DOC-';
+        setUploadCode(`${prefix}${Math.floor(1000 + Math.random() * 9000)}`);
         showToast('อัปโหลดเอกสารเรียบร้อย กำลังวิเคราะห์ OCR...');
       }
 
@@ -632,8 +687,10 @@ export default function App() {
 
   const openInspector = async (id: string) => {
     try {
-      const res = await fetch(`${API_BASE}/documents/${id}?username=${currentUser?.username}`);
-      const data: DocDetail = await res.json();
+      const res = await fetch(`${API_BASE}/documents/${id}?username=${encodeURIComponent(currentUser?.username || 'system')}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'ไม่สามารถโหลดข้อมูลเอกสารได้');
+
       setActiveDoc(data);
       setInspectorTab('ocr');
       setEditTitle(data.title);
@@ -642,11 +699,12 @@ export default function App() {
       setCopied(false);
       setShowVersionTab(false);
 
+      fetchDocs();
       fetch(`${API_BASE}/documents/${id}/versions`)
         .then(r => r.json())
         .then(vData => setVersionHistory(vData.versions || []));
-    } catch (err) {
-      alert('ไม่สามารถโหลดข้อมูลเอกสารได้');
+    } catch (err: any) {
+      alert(err.message);
     }
   };
 
@@ -781,13 +839,7 @@ export default function App() {
 
   const openUserManagement = async () => {
     setShowUserModal(true);
-    try {
-      const res = await fetch(`${API_BASE}/users`);
-      const data = await res.json();
-      setUsersList(data.users || []);
-    } catch (err) {
-      console.error(err);
-    }
+    fetchUsersQuick();
   };
 
   const handleCreateUser = async (e: React.FormEvent) => {
@@ -808,7 +860,7 @@ export default function App() {
       setNewUsername('');
       setNewPassword('');
       setNewFullName('');
-      openUserManagement();
+      fetchUsersQuick();
       showToast('เพิ่มผู้ใช้งานใหม่เรียบร้อย');
     } catch (err: any) {
       alert(err.message);
@@ -832,7 +884,7 @@ export default function App() {
       if (!res.ok) throw new Error('บันทึกการแก้ไขไม่สำเร็จ');
       setEditingUser(null);
       setEditPassword('');
-      openUserManagement();
+      fetchUsersQuick();
       showToast('แก้ไขข้อมูลผู้ใช้เรียบร้อย');
     } catch (err: any) {
       alert(err.message);
@@ -866,7 +918,7 @@ export default function App() {
       if (!res.ok) throw new Error(data.detail || 'ลบผู้ใช้ไม่สำเร็จ');
       
       showToast(data.message);
-      openUserManagement();
+      fetchUsersQuick();
     } catch (err: any) {
       alert(err.message);
     }
@@ -1004,7 +1056,6 @@ export default function App() {
             </button>
           </form>
 
-          {/* เส้นคั่นตัวเลือก Single Sign-On */}
           <div className="relative my-6 text-center">
             <div className={`absolute inset-0 flex items-center ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
               <div className="w-full border-t border-slate-700/60"></div>
@@ -1014,7 +1065,6 @@ export default function App() {
             </span>
           </div>
 
-          {/* ลิงก์ตรงไปยัง OAuth ของ Backend */}
           <div className="space-y-2.5">
             <a
               href="http://localhost:8000/api/auth/microsoft"
@@ -1283,7 +1333,16 @@ export default function App() {
                   <label className={`text-[10px] block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>หมวดหมู่</label>
                   <select
                     value={uploadCatId}
-                    onChange={(e) => setUploadCatId(Number(e.target.value))}
+                    onChange={(e) => {
+                      const newId = Number(e.target.value);
+                      setUploadCatId(newId);
+                      const selected = categories.find((c) => c.id === newId);
+                      if (selected) {
+                        const prefix = getCategoryPrefix(selected.name);
+                        setUploadCode(`${prefix}${Math.floor(1000 + Math.random() * 9000)}`);
+                        setBulkCodePrefix(prefix);
+                      }
+                    }}
                     className={`w-full border rounded-lg px-2 py-2 text-xs outline-none transition ${isDark ? 'bg-[#1e293b] border-slate-700 text-white focus:border-cyan-500' : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-cyan-600'}`}
                   >
                     {categories.map((c) => (
@@ -1292,7 +1351,7 @@ export default function App() {
                   </select>
                 </div>
                 <div>
-                  <label className={`text-[10px] block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>แผนก</label>
+                  <label className={`text-[10px] block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>แผนกหลัก</label>
                   <select
                     value={uploadDeptId}
                     onChange={(e) => setUploadDeptId(Number(e.target.value))}
@@ -1326,6 +1385,82 @@ export default function App() {
                   onChange={(e) => setUploadTags(e.target.value)}
                   className={`w-full border rounded-lg px-3 py-2 text-xs outline-none transition ${isDark ? 'bg-[#1e293b] border-slate-700 text-white focus:border-cyan-500' : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-cyan-600'}`}
                 />
+              </div>
+
+              {/* สิทธิ์การเข้าถึงเอกสาร (Access Control) แสดงทั้งในโหมดปกติและ Bulk */}
+              <div className={`p-3.5 border rounded-xl space-y-3 ${isDark ? 'bg-[#0c1322] border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                <div className="flex items-center justify-between">
+                  <label className={`text-xs font-bold flex items-center gap-1.5 ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>
+                    <Lock className="w-3.5 h-3.5" /> สิทธิ์การเข้าถึงเอกสาร (Access Control)
+                  </label>
+                </div>
+                
+                <div className="flex items-center gap-4 text-xs">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input 
+                      type="radio" 
+                      name="perm" 
+                      checked={uploadIsPublic} 
+                      onChange={() => setUploadIsPublic(true)} 
+                    />
+                    <span>ทุกคนเข้าถึงได้ (Public)</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input 
+                      type="radio" 
+                      name="perm" 
+                      checked={!uploadIsPublic} 
+                      onChange={() => setUploadIsPublic(false)} 
+                    />
+                    <span>จำกัดสิทธิ์ (Restricted)</span>
+                  </label>
+                </div>
+
+                {!uploadIsPublic && (
+                  <div className="pt-2.5 border-t border-slate-700/50 space-y-3">
+                    <div>
+                      <span className="text-[11px] font-semibold text-amber-500 flex items-center gap-1 mb-1.5">
+                        <Building2 className="w-3 h-3" /> แผนกที่อนุญาตให้เข้าดู:
+                      </span>
+                      <div className="grid grid-cols-2 gap-1.5 max-h-24 overflow-y-auto pr-1">
+                        {departments.map((d) => (
+                          <label key={d.id} className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+                            <input 
+                              type="checkbox"
+                              checked={uploadAllowedDepts.includes(d.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) setUploadAllowedDepts(prev => [...prev, d.id]);
+                                else setUploadAllowedDepts(prev => prev.filter(id => id !== d.id));
+                              }}
+                            />
+                            <span className="truncate">{d.name}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-800">
+                      <span className="text-[11px] font-semibold text-cyan-500 flex items-center gap-1 mb-1.5">
+                        <Users className="w-3 h-3" /> หรืออนุญาตเฉพาะรายบุคคล:
+                      </span>
+                      <div className="grid grid-cols-2 gap-1.5 max-h-24 overflow-y-auto pr-1">
+                        {usersList.filter(u => u.username !== currentUser?.username).map(u => (
+                          <label key={u.id} className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+                            <input 
+                              type="checkbox"
+                              checked={uploadAllowedUsers.includes(u.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) setUploadAllowedUsers(prev => [...prev, u.id]);
+                                else setUploadAllowedUsers(prev => prev.filter(id => id !== u.id));
+                              }}
+                            />
+                            <span className="truncate">{u.full_name} <span className="text-slate-500 text-[9px]">({u.department_name || 'ไม่ระบุ'})</span></span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1403,7 +1538,7 @@ export default function App() {
                 <div className="space-y-2">
                   <div className={`p-2.5 border rounded-xl flex items-center justify-between ${isDark ? 'bg-slate-900/80 border-cyan-500/30' : 'bg-slate-100 border-slate-200'}`}>
                     <div className="flex items-center gap-2 overflow-hidden">
-                      <File className="w-4 h-4 text-cyan-500 shrink-0" />
+                      <FileIcon className="w-4 h-4 text-cyan-500 shrink-0" />
                       <div className="overflow-hidden">
                         <p className={`text-xs font-medium truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>{selectedSingleFile.name}</p>
                         <p className="text-[10px] text-slate-500">{formatFileSize(selectedSingleFile.size)}</p>
@@ -1463,7 +1598,7 @@ export default function App() {
                       className={`p-2 border rounded-lg flex items-center justify-between transition ${isDark ? 'bg-slate-900/80 border-slate-700/80 hover:border-cyan-500/30' : 'bg-slate-50 border-slate-200 hover:border-cyan-500'}`}
                     >
                       <div className="flex items-center gap-2 overflow-hidden flex-1 mr-2">
-                        <File className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                        <FileIcon className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
                         <div className="overflow-hidden">
                           <p className={`text-[11px] truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>{file.name}</p>
                           <p className="text-[9px] text-slate-500">{formatFileSize(file.size)}</p>
@@ -1714,6 +1849,7 @@ export default function App() {
                     <th className="py-3 px-3">หมวดหมู่ / แผนก / สาขา</th>
                     <th className="py-3 px-3">รหัส</th>
                     <th className="py-3 px-3">วันที่</th>
+                    <th className="py-3 px-3">สิทธิ์</th>
                     <th className="py-3 px-3">สถานะ</th>
                     <th className="py-3 px-3 text-right">จัดการ</th>
                   </tr>
@@ -1721,8 +1857,8 @@ export default function App() {
                 <tbody className={`divide-y ${isDark ? 'divide-slate-800/60' : 'divide-slate-200'}`}>
                   {docs.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-400">
-                        ไม่มีรายการเอกสาร หรือไม่พบข้อมูลตามคำค้นหา
+                      <td colSpan={8} className="py-8 text-center text-slate-400">
+                        ไม่มีรายการเอกสาร หรือคุณไม่มีสิทธิ์เข้าถึงเอกสารในส่วนนี้
                       </td>
                     </tr>
                   ) : (
@@ -1763,8 +1899,19 @@ export default function App() {
                           <span className={`block ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{doc.category_name}</span>
                           <span className="text-[10px] text-slate-400 block">{doc.department_name} • {doc.branch_name}</span>
                         </td>
-                        <td className="py-3 px-3 text-slate-400">{doc.document_code}</td>
+                        <td className="py-3 px-3 text-slate-400 font-mono">{doc.document_code}</td>
                         <td className="py-3 px-3 text-slate-400">{doc.document_date}</td>
+                        <td className="py-3 px-3">
+                          {doc.is_public ? (
+                            <span className="text-[10px] text-emerald-500 font-medium flex items-center gap-1">
+                              <ShieldCheck className="w-3 h-3" /> สาธารณะ
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-amber-500 font-medium flex items-center gap-1">
+                              <Lock className="w-3 h-3" /> จำกัดสิทธิ์
+                            </span>
+                          )}
+                        </td>
                         <td className="py-3 px-3">
                           {doc.status === 'COMPLETED' ? (
                             <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 inline-flex items-center gap-1">
@@ -1805,7 +1952,7 @@ export default function App() {
           <div className={`w-full max-w-5xl h-[88vh] border rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 ${isDark ? 'bg-[#0f172a] border-cyan-500/30' : 'bg-white border-slate-200'}`}>
             <div className={`px-6 py-3.5 border-b flex items-center justify-between ${isDark ? 'bg-[#131d33] border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
               <div className="flex items-center gap-2">
-                <File className="w-4 h-4 text-cyan-500" />
+                <FileIcon className="w-4 h-4 text-cyan-500" />
                 <h3 className={`text-sm font-bold truncate max-w-lg ${isDark ? 'text-white' : 'text-slate-900'}`}>{selectedSingleFile.name}</h3>
                 <span className="text-[10px] text-slate-400 font-mono">({formatFileSize(selectedSingleFile.size)})</span>
               </div>
@@ -1840,7 +1987,7 @@ export default function App() {
           <div className={`w-full max-w-5xl h-[88vh] border rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 ${isDark ? 'bg-[#0f172a] border-cyan-500/30' : 'bg-white border-slate-200'}`}>
             <div className={`px-6 py-3.5 border-b flex items-center justify-between ${isDark ? 'bg-[#131d33] border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
               <div className="flex items-center gap-2">
-                <File className="w-4 h-4 text-cyan-500" />
+                <FileIcon className="w-4 h-4 text-cyan-500" />
                 <h3 className={`text-sm font-bold truncate max-w-lg ${isDark ? 'text-white' : 'text-slate-900'}`}>{previewModalFile.name}</h3>
                 <span className="text-[10px] text-slate-400 font-mono">({formatFileSize(previewModalFile.size)})</span>
               </div>
@@ -1995,7 +2142,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Inspector Modal (พร้อมตัวนับยอดการเข้าชม View Counter) */}
+      {/* Inspector Modal */}
       {activeDoc && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className={`w-full max-w-6xl border rounded-2xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden animate-in fade-in zoom-in-95 duration-200 ${isDark ? 'bg-[#0f172a] border-cyan-500/30' : 'bg-white border-slate-200'}`}>
@@ -2007,7 +2154,6 @@ export default function App() {
                     v{activeDoc.current_version || 1}
                   </span>
 
-                  {/* ⭐️ Badge แสดงจำนวนครั้งที่เปิดดูเอกสาร ⭐️ */}
                   <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-medium flex items-center gap-1 border ${isDark ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30' : 'bg-indigo-50 text-indigo-700 border-indigo-200'}`}>
                     <Eye className="w-3 h-3 text-indigo-500" /> เปิดดูแล้ว {activeDoc.view_count || 1} ครั้ง
                   </span>
@@ -2354,7 +2500,7 @@ export default function App() {
         </div>
       )}
 
-      {/* User Management Modal (พร้อมเลือกแผนก และแก้ไขผู้ใช้) */}
+      {/* User Management Modal */}
       {showUserModal && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div className={`w-full max-w-3xl border rounded-2xl shadow-2xl p-6 flex flex-col max-h-[85vh] ${isDark ? 'bg-[#0f172a] border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -2368,7 +2514,7 @@ export default function App() {
               </button>
             </div>
 
-            {/* ฟอร์ม: สลับระหว่าง "เพิ่มผู้ใช้" กับ "แก้ไขผู้ใช้" */}
+            {/* ฟอร์มเพิ่ม/แก้ไข */}
             {editingUser ? (
               <form onSubmit={handleUpdateUser} className={`p-4 rounded-xl border mb-4 space-y-3 ${isDark ? 'bg-indigo-950/20 border-indigo-500/40' : 'bg-indigo-50/50 border-indigo-200'}`}>
                 <div className="flex items-center justify-between">
@@ -2470,6 +2616,7 @@ export default function App() {
               </form>
             )}
 
+            {/* ตารางแสดงรายชื่อผู้ใช้ */}
             <div className="overflow-y-auto flex-1">
               <table className={`w-full text-left text-xs ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
                 <thead className={`uppercase text-[10px] ${isDark ? 'bg-slate-800/40 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>
