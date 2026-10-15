@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  FileText, Search, UploadCloud, Eye, Trash2, CheckCircle2, 
+  FileText, Search, UploadCloud, Eye, EyeOff, Trash2, CheckCircle2, 
   Clock, AlertCircle, Download, FileSpreadsheet, History, LogOut, 
   DollarSign, Building2, UserCheck, Users, FolderPlus,
   Edit3, Save, X, Copy, Check, FileDown, Layers, File as FileIcon,
@@ -135,8 +135,9 @@ export default function App() {
 
   const isDark = theme === 'dark';
 
-  const [usernameInput, setUsernameInput] = useState('admin');
-  const [passwordInput, setPasswordInput] = useState('admin123');
+  const [usernameInput, setUsernameInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loginError, setLoginError] = useState('');
 
   const [stats, setStats] = useState({
@@ -1028,24 +1029,31 @@ export default function App() {
                 type="text"
                 value={usernameInput}
                 onChange={(e) => setUsernameInput(e.target.value)}
+                placeholder="กรอกชื่อผู้ใช้งาน..."
                 className={`w-full border rounded-lg px-4 py-2.5 text-sm outline-none transition ${isDark ? 'bg-[#1e293b] border-slate-700 text-white focus:border-cyan-500' : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-cyan-600'}`}
                 required
               />
             </div>
             <div>
               <label className={`text-xs block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>รหัสผ่าน</label>
-              <input
-                type="password"
-                value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
-                className={`w-full border rounded-lg px-4 py-2.5 text-sm outline-none transition ${isDark ? 'bg-[#1e293b] border-slate-700 text-white focus:border-cyan-500' : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-cyan-600'}`}
-                required
-              />
-            </div>
-
-            <div className={`p-3 rounded-lg border text-[11px] space-y-1 ${isDark ? 'bg-slate-800/60 border-slate-700/50 text-slate-400' : 'bg-slate-50 border-slate-200 text-slate-600'}`}>
-              <p><strong className="text-amber-500">🔑 Admin:</strong> admin / admin123 (สิทธิ์เต็ม & Audit Logs)</p>
-              <p><strong className="text-cyan-600">👤 User:</strong> user / user123 (อัปโหลดและสืบค้นเอกสาร)</p>
+              <div className="relative">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={passwordInput}
+                  onChange={(e) => setPasswordInput(e.target.value)}
+                  placeholder="กรอกรหัสผ่าน..."
+                  className={`w-full border rounded-lg pl-4 pr-11 py-2.5 text-sm outline-none transition ${isDark ? 'bg-[#1e293b] border-slate-700 text-white focus:border-cyan-500' : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-cyan-600'}`}
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className={`absolute right-3 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-cyan-500 transition focus:outline-none`}
+                  title={showPassword ? "ซ่อนรหัสผ่าน" : "แสดงรหัสผ่าน"}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
 
             <button
@@ -1056,6 +1064,7 @@ export default function App() {
             </button>
           </form>
 
+          {/* เส้นคั่นตัวเลือก Single Sign-On */}
           <div className="relative my-6 text-center">
             <div className={`absolute inset-0 flex items-center ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
               <div className="w-full border-t border-slate-700/60"></div>
@@ -1065,24 +1074,8 @@ export default function App() {
             </span>
           </div>
 
+          {/* ปุ่มล็อกอินด้วย GitHub */}
           <div className="space-y-2.5">
-            <a
-              href="http://localhost:8000/api/auth/microsoft"
-              className={`w-full py-2.5 px-4 rounded-xl border flex items-center justify-center gap-3 text-xs font-semibold transition shadow-sm ${
-                isDark 
-                  ? 'bg-[#182338] hover:bg-[#202e49] border-indigo-500/40 text-indigo-200' 
-                  : 'bg-indigo-50 hover:bg-indigo-100/80 border-indigo-200 text-indigo-800'
-              }`}
-            >
-              <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none">
-                <path d="M11 11H1V1H11V11Z" fill="#F25022"/>
-                <path d="M23 11H13V1H23V11Z" fill="#7FBA00"/>
-                <path d="M11 23H1V13H11V23Z" fill="#00A4EF"/>
-                <path d="M23 23H13V13H23V23Z" fill="#FFB900"/>
-              </svg>
-              <span>เข้าสู่ระบบด้วย Microsoft Teams</span>
-            </a>
-
             <a
               href="http://localhost:8000/api/auth/github"
               className={`w-full py-2.5 px-4 rounded-xl border flex items-center justify-center gap-3 text-xs font-semibold transition shadow-sm ${
@@ -1387,7 +1380,7 @@ export default function App() {
                 />
               </div>
 
-              {/* สิทธิ์การเข้าถึงเอกสาร (Access Control) แสดงทั้งในโหมดปกติและ Bulk */}
+              {/* สิทธิ์การเข้าถึงเอกสาร (Access Control) */}
               <div className={`p-3.5 border rounded-xl space-y-3 ${isDark ? 'bg-[#0c1322] border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                 <div className="flex items-center justify-between">
                   <label className={`text-xs font-bold flex items-center gap-1.5 ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>
