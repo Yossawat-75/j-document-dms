@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 1. PostgreSQL Database
   postgres:
@@ -7,14 +5,16 @@ services:
     container_name: dms_postgres
     restart: always
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password123
-      POSTGRES_DB: dms_db
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password123}
+      POSTGRES_DB: ${POSTGRES_DB:-dms_db}
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - dms_network
 
   # 2. Redis Message Broker
   redis:
@@ -23,98 +23,107 @@ services:
     restart: always
     ports:
       - "6379:6379"
+    networks:
+      - dms_network
 
-  # 3. MinIO Object Storage
+  # 3. Object Storage (MinIO)
   minio:
     image: minio/minio:latest
     container_name: dms_minio
     restart: always
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - miniodata:/data
+      - minio_data:/data
+    networks:
+      - dms_network
 
-  # 3.1 MinIO Bucket Auto-Creator
-  createbuckets:
-    image: minio/mc:latest
-    container_name: dms_minio_init
-    depends_on:
-      - minio
-    entrypoint: >
-      /bin/sh -c "
-      /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin;
-      /usr/bin/mc mb local/dms-documents;
-      /usr/bin/mc anonymous set download local/dms-documents;
-      exit 0;
-      "
-
-  # 4. FastAPI Backend API (Mount โฟลเดอร์สแกนเนอร์ scanner_inbox)
+  # 4. Backend (FastAPI API Server)
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: dms_backend
     restart: always
-    depends_on:
-      - postgres
-      - redis
-      - minio
     environment:
-      DATABASE_URL: postgresql://postgres:password123@postgres:5432/dms_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password123}@postgres:5432/${POSTGRES_DB:-dms_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password123}
+      POSTGRES_DB: ${POSTGRES_DB:-dms_db}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_BUCKET_NAME: dms-documents
-      MINIO_SECURE: "false"
-    volumes:
-      - ./scanner_inbox:/app/scanner_inbox
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_default}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
     ports:
       - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    networks:
+      - dms_network
 
-  # 5. Celery OCR Worker
-  celery_worker:
+  # 5. Worker (Celery OCR Processor)
+  worker:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: dms_celery_worker
+    container_name: dms_worker
     restart: always
-    command: celery -A app.workers.ocr_worker.celery_app worker --loglevel=info
-    depends_on:
-      - backend
-      - redis
-      - postgres
-      - minio
+    command: celery -A app.workers.ocr_worker worker --loglevel=info
     environment:
-      DATABASE_URL: postgresql://postgres:password123@postgres:5432/dms_db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password123}@postgres:5432/${POSTGRES_DB:-dms_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password123}
+      POSTGRES_DB: ${POSTGRES_DB:-dms_db}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_BUCKET_NAME: dms-documents
-      MINIO_SECURE: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    networks:
+      - dms_network
 
-  # 6. React Frontend Client
+  # 6. Frontend (React / Nginx Web Client)
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: dms_frontend
     restart: always
-    depends_on:
-      - backend
     ports:
       - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - dms_network
 
 volumes:
   pgdata:
-  miniodata:
+  minio_data:
+
+networks:
+  dms_network:
+    driver: bridge
