@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""
     GITHUB_REDIRECT_URI: str = "http://localhost:8000/api/auth/github/callback"
-    GITHUB_ALLOWED_USERS: str = ""
-    GITHUB_ADMIN_USERS: str = ""
+    GITHUB_ALLOWED_EMAILS: str = ""
+    GITHUB_ADMIN_EMAILS: str = ""
 
     MS_CLIENT_ID: str = ""
     MS_CLIENT_SECRET: str = ""
@@ -58,12 +58,12 @@ class Settings(BaseSettings):
         return f"{endpoint}:{self.MINIO_PORT}"
 
     @property
-    def github_allowed_users(self) -> set[str]:
-        return {username.strip().lower() for username in self.GITHUB_ALLOWED_USERS.split(",") if username.strip()}
+    def github_allowed_emails(self) -> set[str]:
+        return {email.strip().lower() for email in self.GITHUB_ALLOWED_EMAILS.split(",") if email.strip()}
 
     @property
-    def github_admin_users(self) -> set[str]:
-        return {username.strip().lower() for username in self.GITHUB_ADMIN_USERS.split(",") if username.strip()}
+    def github_admin_emails(self) -> set[str]:
+        return {email.strip().lower() for email in self.GITHUB_ADMIN_EMAILS.split(",") if email.strip()}
 
 
 settings = Settings()

@@ -381,19 +381,36 @@ def github_callback(code: str, state: str, request: Request):
         "User-Agent": "J-Document-DMS",
         "X-GitHub-Api-Version": "2022-11-28",
     })
+    email_request = urllib.request.Request("https://api.github.com/user/emails", headers={
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "J-Document-DMS",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
     try:
         with urllib.request.urlopen(user_request, timeout=10) as response:
             github_user = json.loads(response.read().decode())
+        with urllib.request.urlopen(email_request, timeout=10) as response:
+            github_email_items = json.loads(response.read().decode())
     except Exception:
         raise HTTPException(status_code=502, detail="Unable to load the GitHub user profile")
 
     github_login = str(github_user.get("login") or "").strip()
-    if not github_login or github_login.lower() not in settings.github_allowed_users:
-        raise HTTPException(status_code=403, detail="This GitHub account is not allowed")
+    if not github_login or not isinstance(github_email_items, list):
+        raise HTTPException(status_code=401, detail="GitHub authentication failed")
+
+    verified_emails = {
+        str(item.get("email") or "").strip().lower()
+        for item in github_email_items
+        if isinstance(item, dict) and item.get("verified") is True and item.get("email")
+    }
+    allowed_emails = settings.github_allowed_emails | settings.github_admin_emails
+    if not verified_emails.intersection(allowed_emails):
+        raise HTTPException(status_code=403, detail="This verified GitHub email is not allowed")
 
     username = f"gh_{github_login}"
     full_name = github_user.get("name") or github_login
-    default_role = "ADMIN" if github_login.lower() in settings.github_admin_users else "USER"
+    default_role = "ADMIN" if verified_emails.intersection(settings.github_admin_emails) else "USER"
     response = handle_oauth_user_session(username, full_name, "GitHub", default_role)
     response.delete_cookie("dms_github_oauth_state", path="/")
     return response
