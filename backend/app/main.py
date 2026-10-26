@@ -315,7 +315,7 @@ def login(req: LoginRequest):
 def login_github():
     if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
         if settings.ALLOW_MOCK_OAUTH and settings.APP_ENV == "development":
-            return RedirectResponse(f"{settings.API_PUBLIC_URL.rstrip('/')}/api/auth/oauth/mock-direct?provider=github")
+            return RedirectResponse(f"{settings.api_public_base_url}/api/auth/oauth/mock-direct?provider=github")
         raise HTTPException(status_code=503, detail="GitHub login is not configured")
 
     state = secrets.token_urlsafe(32)
@@ -403,7 +403,7 @@ def github_callback(code: str, state: str, request: Request):
 def login_microsoft():
     if not MS_CLIENT_ID or not MS_CLIENT_SECRET:
         if settings.ALLOW_MOCK_OAUTH and settings.APP_ENV == "development":
-            return RedirectResponse(f"{settings.API_PUBLIC_URL.rstrip('/')}/api/auth/oauth/mock-direct?provider=microsoft")
+            return RedirectResponse(f"{settings.api_public_base_url}/api/auth/oauth/mock-direct?provider=microsoft")
         raise HTTPException(status_code=503, detail="Microsoft login is not configured")
 
     query = urllib.parse.urlencode({
@@ -1416,7 +1416,7 @@ def get_document_detail(document_id: str, username: Optional[str] = Query("syste
         
         raw_text = ext["raw_text"] if ext and ext.get("raw_text") else ""
         structured_data = extract_structured_json(raw_text)
-        download_url = f"{settings.API_PUBLIC_URL.rstrip('/')}/api/documents/{doc['id']}/file"
+        download_url = f"{settings.api_public_base_url}/api/documents/{doc['id']}/file"
 
         record_audit_log(username, "VIEW", str(doc["id"]), f"Inspected document {doc['document_code']} (Total Views: {current_view_count})")
 

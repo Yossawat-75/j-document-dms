@@ -1,5 +1,6 @@
 import io
 from datetime import timedelta
+from urllib.parse import urlparse
 
 from minio import Minio
 
@@ -8,10 +9,10 @@ from app.core.config import settings
 
 def get_minio_client(endpoint: str | None = None, secure: bool | None = None) -> Minio:
     return Minio(
-        endpoint or settings.MINIO_ENDPOINT,
+        endpoint or settings.minio_internal_endpoint,
         access_key=settings.MINIO_ACCESS_KEY,
         secret_key=settings.MINIO_SECRET_KEY,
-        secure=settings.MINIO_SECURE if secure is None else secure,
+        secure=settings.MINIO_USE_SSL if secure is None else secure,
     )
 
 
@@ -24,7 +25,7 @@ def upload_file_to_minio(
     bucket_name = settings.MINIO_BUCKET_NAME
 
     if not client.bucket_exists(bucket_name):
-        client.make_bucket(bucket_name)
+        raise RuntimeError("Configured MinIO bucket does not exist")
 
     client.put_object(
         bucket_name,
@@ -37,9 +38,20 @@ def upload_file_to_minio(
 
 
 def get_file_download_url(storage_key: str) -> str:
-    endpoint = settings.MINIO_PUBLIC_ENDPOINT or settings.MINIO_ENDPOINT
-    secure = settings.MINIO_PUBLIC_SECURE if settings.MINIO_PUBLIC_ENDPOINT else settings.MINIO_SECURE
-    client = get_minio_client(endpoint=endpoint, secure=secure)
+    if not settings.MINIO_PUBLIC_URL:
+        client = get_minio_client()
+    else:
+        public_url = urlparse(settings.MINIO_PUBLIC_URL)
+        if not public_url.hostname or public_url.path not in ("", "/"):
+            raise RuntimeError("MINIO_PUBLIC_URL must contain only scheme and host")
+        public_endpoint = public_url.hostname
+        if public_url.port:
+            public_endpoint = f"{public_endpoint}:{public_url.port}"
+        client = get_minio_client(
+            endpoint=public_endpoint,
+            secure=public_url.scheme == "https",
+        )
+
     return client.presigned_get_object(
         settings.MINIO_BUCKET_NAME,
         storage_key,

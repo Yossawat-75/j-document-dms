@@ -35,7 +35,7 @@ usage() {
 ${BOLD}J-Document DMS UAT deployment${RESET}
 
 Usage:
-  ./deploy.sh uat [command] [--no-cache] [--no-pull]
+  bash deploy.sh uat [command] [--no-cache] [--no-pull]
 
 Commands:
   up           Sync, build, initialize dependencies, and deploy (default)
@@ -56,11 +56,11 @@ Deploy key:
     $HOME/.ssh/j_document_dms_uat_deploy
 
 Examples:
-  ./deploy.sh uat github-key
-  ./deploy.sh uat preflight
-  ./deploy.sh uat up
-  ./deploy.sh uat up --no-cache
-  ./deploy.sh uat build --no-pull
+  bash deploy.sh uat github-key
+  bash deploy.sh uat preflight
+  bash deploy.sh uat up
+  bash deploy.sh uat up --no-cache
+  bash deploy.sh uat build --no-pull
 EOF
 }
 
@@ -116,6 +116,28 @@ compose() {
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
 }
 
+ensure_shared_minio_network() {
+  local minio_container network attached_networks
+  minio_container="$(read_env MINIO_ENDPOINT)"
+  network="$(read_env TRAEFIK_NETWORK)"
+
+  docker container inspect "$minio_container" >/dev/null 2>&1 \
+    || die "Shared MinIO container '$minio_container' was not found"
+
+  attached_networks="$(docker container inspect \
+    --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+    "$minio_container")"
+
+  if printf '%s\n' "$attached_networks" | grep -Fxq "$network"; then
+    ok "Shared MinIO is connected to $network"
+    return 0
+  fi
+
+  info "Connecting shared MinIO '$minio_container' to $network"
+  docker network connect --alias "$minio_container" "$network" "$minio_container"
+  ok "Shared MinIO connected to $network"
+}
+
 preflight() {
   info "Validating UAT configuration"
   command -v docker >/dev/null 2>&1 || die "Docker is unavailable"
@@ -129,16 +151,19 @@ preflight() {
   require_exact_env API_DOMAIN "api-uat-intranet.jibcomputer.group"
   require_exact_env DMS_BASE_PATH "/j-document-dms"
   require_exact_env PUBLIC_APP_URL "https://uat-intranet.jibcomputer.group/j-document-dms"
-  require_exact_env API_PUBLIC_URL "https://api-uat-intranet.jibcomputer.group/j-document-dms"
+  require_exact_env API_PUBLIC_URL "https://api-uat-intranet.jibcomputer.group"
   require_exact_env VITE_API_BASE_URL "https://api-uat-intranet.jibcomputer.group/j-document-dms/api"
   require_exact_env GITHUB_REDIRECT_URI "https://api-uat-intranet.jibcomputer.group/j-document-dms/api/auth/github/callback"
-  require_exact_env MINIO_ENDPOINT "minio:9000"
+  require_exact_env MINIO_ENDPOINT "minio"
+  require_exact_env MINIO_PORT "9000"
+  require_exact_env MINIO_USE_SSL "false"
+  require_exact_env MINIO_PUBLIC_URL "https://minio-uat-intranet.jibcomputer.group"
   require_exact_env REDIS_URL "redis://redis:6379/2"
   require_exact_env CELERY_BROKER_URL "redis://redis:6379/0"
   require_exact_env CELERY_RESULT_BACKEND "redis://redis:6379/1"
 
   for key in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL \
-    MINIO_ROOT_USER MINIO_ROOT_PASSWORD MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_BUCKET_NAME MINIO_CONSOLE_BIND_PORT \
+    MINIO_ENDPOINT MINIO_PORT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_PUBLIC_URL MINIO_BUCKET_NAME \
     JWT_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GITHUB_ALLOWED_USERS GITHUB_ADMIN_USERS TRAEFIK_NETWORK; do
     require_env "$key"
   done
@@ -150,6 +175,7 @@ preflight() {
     docker network create "$(read_env TRAEFIK_NETWORK)" >/dev/null
   fi
 
+  ensure_shared_minio_network
   compose config --quiet
   ok "UAT pre-flight checks passed"
 }
@@ -195,7 +221,7 @@ sync_source() {
   fi
 
   [[ -d "$ROOT_DIR/.git" ]] || die "$ROOT_DIR is not a Git repository"
-  [[ -f "$DEPLOY_SSH_KEY" && -r "$DEPLOY_SSH_KEY" ]] || die "Deploy key is missing: $DEPLOY_SSH_KEY. Run './deploy.sh uat github-key' first"
+  [[ -f "$DEPLOY_SSH_KEY" && -r "$DEPLOY_SSH_KEY" ]] || die "Deploy key is missing: $DEPLOY_SSH_KEY. Run 'bash deploy.sh uat github-key' first"
   [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]] || die "Working tree is not clean. Commit or back up changes before deployment"
   [[ "$(git -C "$ROOT_DIR" symbolic-ref --short HEAD)" == "$DEPLOY_BRANCH" ]] || die "Checkout must be on branch $DEPLOY_BRANCH"
   git check-ref-format --branch "$DEPLOY_BRANCH" >/dev/null 2>&1 || die "Invalid DEPLOY_BRANCH"
@@ -227,23 +253,27 @@ build_images() {
 }
 
 deploy_stack() {
-  info "Starting PostgreSQL, Redis, and MinIO"
-  compose up -d --wait --wait-timeout 120 postgres redis minio
+  info "Starting PostgreSQL and Redis"
+  compose up -d --remove-orphans --wait --wait-timeout 120 postgres redis
 
-  info "Creating the MinIO bucket and application user"
-  compose run --rm minio-init
+  info "Verifying shared MinIO access and bucket"
+  compose run --rm --no-deps backend python -c \
+    "from app.core.config import settings; from app.services.storage import get_minio_client; raise SystemExit(0 if get_minio_client().bucket_exists(settings.MINIO_BUCKET_NAME) else 1)" \
+    || die "Cannot access shared MinIO bucket: $(read_env MINIO_BUCKET_NAME)"
+  ok "Shared MinIO bucket is accessible"
 
   info "Starting API, OCR worker, and frontend"
   compose up -d --remove-orphans --wait --wait-timeout 240 backend worker frontend
   compose ps
 
-  local app_url api_url
+  local app_url api_url base_path
   app_url="$(read_env PUBLIC_APP_URL)"
   api_url="$(read_env API_PUBLIC_URL)"
+  base_path="$(read_env DMS_BASE_PATH)"
   ok "UAT deployment completed"
   printf "  Web: %s/\n" "$app_url"
-  printf "  API health: %s/health/ready\n" "$api_url"
-  printf "  MinIO console (server loopback): http://127.0.0.1:%s\n" "$(read_env MINIO_CONSOLE_BIND_PORT)"
+  printf "  API health: %s%s/health/ready\n" "$api_url" "$base_path"
+  printf "  Shared MinIO: %s (bucket: %s)\n" "$(read_env MINIO_PUBLIC_URL)" "$(read_env MINIO_BUCKET_NAME)"
 }
 
 case "$COMMAND" in
