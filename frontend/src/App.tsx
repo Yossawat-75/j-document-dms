@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import * as XLSX from 'xlsx';
 import { 
   FileText, Search, UploadCloud, Eye, EyeOff, Trash2, CheckCircle2, 
   Clock, AlertCircle, Download, FileSpreadsheet, History, LogOut, 
@@ -35,6 +36,133 @@ const getCategoryPrefix = (catName: string) => {
   }
   return 'DOC-';
 };
+
+const isExcelOrSpreadsheet = (filename: string = '', mimeType: string = '') => {
+  const name = filename.toLowerCase();
+  const mime = mimeType.toLowerCase();
+  return (
+    name.endsWith('.xlsx') ||
+    name.endsWith('.xls') ||
+    name.endsWith('.csv') ||
+    mime.includes('spreadsheet') ||
+    mime.includes('excel') ||
+    mime.includes('csv')
+  );
+};
+
+// คอมโพเนนต์แสดงผลตาราง Excel บนหน้าเว็บ
+function ExcelSheetViewer({ fileUrl, fileBlob }: { fileUrl?: string; fileBlob?: Blob | null }) {
+  const [sheets, setSheets] = useState<{ [sheetName: string]: any[][] }>({});
+  const [sheetNames, setSheetNames] = useState<string[]>([]);
+  const [activeSheet, setActiveSheet] = useState<string>('');
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    setLoading(true);
+    setError(null);
+
+    const loadWorkbook = async () => {
+      try {
+        let arrayBuffer: ArrayBuffer;
+        if (fileBlob) {
+          arrayBuffer = await fileBlob.arrayBuffer();
+        } else if (fileUrl) {
+          const res = await fetch(fileUrl);
+          if (!res.ok) throw new Error('ไม่สามารถดาวน์โหลดไฟล์ตารางเพื่อแสดงผลได้');
+          arrayBuffer = await res.arrayBuffer();
+        } else {
+          return;
+        }
+
+        const wb = XLSX.read(arrayBuffer, { type: 'array' });
+        if (!isMounted) return;
+
+        const parsedSheets: { [key: string]: any[][] } = {};
+        wb.SheetNames.forEach((name) => {
+          const sheet = wb.Sheets[name];
+          parsedSheets[name] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+        });
+
+        setSheets(parsedSheets);
+        setSheetNames(wb.SheetNames);
+        if (wb.SheetNames.length > 0) {
+          setActiveSheet(wb.SheetNames[0]);
+        }
+      } catch (err: any) {
+        if (isMounted) setError(err.message || 'เกิดข้อผิดพลาดในการอ่านข้อมูลตาราง');
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    loadWorkbook();
+    return () => { isMounted = false; };
+  }, [fileUrl, fileBlob]);
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-2 p-6">
+        <Clock className="w-6 h-6 animate-spin text-cyan-500" />
+        <span className="text-xs">กำลังเรนเดอร์เนื้อหาตารางสเปรดชีต...</span>
+      </div>
+    );
+  }
+
+  if (error || sheetNames.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-slate-400 p-6 text-center">
+        <AlertCircle className="w-8 h-8 text-rose-500 mb-2" />
+        <p className="text-xs">{error || 'ไม่พบข้อมูลในชีต'}</p>
+      </div>
+    );
+  }
+
+  const rows = sheets[activeSheet] || [];
+
+  return (
+    <div className="flex flex-col h-full bg-[#070b14] text-slate-200 overflow-hidden select-text">
+      {sheetNames.length > 1 && (
+        <div className="flex gap-1 overflow-x-auto p-1.5 bg-[#0c1322] border-b border-slate-800 shrink-0 text-xs">
+          {sheetNames.map((name) => (
+            <button
+              key={name}
+              type="button"
+              onClick={() => setActiveSheet(name)}
+              className={`px-3 py-1 rounded text-[11px] font-medium transition shrink-0 ${
+                activeSheet === name
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'bg-slate-800 text-slate-400 hover:text-white'
+              }`}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-auto p-2">
+        <table className="min-w-full border-collapse border border-slate-800 text-[11px] font-mono">
+          <tbody>
+            {rows.map((row, rIdx) => (
+              <tr key={rIdx} className="hover:bg-slate-850/50">
+                <td className="px-2 py-1 bg-slate-900 border border-slate-800 text-slate-500 text-center select-none w-8 text-[10px]">
+                  {rIdx + 1}
+                </td>
+                {row.map((cell, cIdx) => (
+                  <td key={cIdx} className="px-2.5 py-1 border border-slate-800/80 whitespace-nowrap text-slate-300">
+                    {String(cell)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 interface User {
   id: number;
@@ -188,7 +316,7 @@ export default function App() {
   const [showFullPreviewModal, setShowFullPreviewModal] = useState(false);
   const [bulkFiles, setBulkFiles] = useState<globalThis.File[]>([]);
   
-  const [previewModalFile, setPreviewModalFile] = useState<{ name: string; size: number; url: string } | null>(null);
+  const [previewModalFile, setPreviewModalFile] = useState<{ name: string; size: number; url: string; rawFile?: globalThis.File } | null>(null);
 
   const [uploading, setUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -242,6 +370,14 @@ export default function App() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newDeptName, setNewDeptName] = useState('');
   const [newBranchName, setNewBranchName] = useState('');
+
+  // ซิงค์แผนกของ user คนปัจจุบันเข้ากับช่องอัปโหลดทันทีเมื่อล็อกอิน
+  useEffect(() => {
+    if (currentUser?.department_id && currentUser.role !== 'ADMIN') {
+      setUploadDeptId(currentUser.department_id);
+      setUploadAllowedDepts([currentUser.department_id]);
+    }
+  }, [currentUser]);
 
   useEffect(() => {
     searchQueryRef.current = searchQuery;
@@ -326,6 +462,10 @@ export default function App() {
       
       sessionStorage.setItem('dms_user', JSON.stringify(data.user));
       setCurrentUser(data.user);
+      if (data.user.department_id && data.user.role !== 'ADMIN') {
+        setUploadDeptId(data.user.department_id);
+        setUploadAllowedDepts([data.user.department_id]);
+      }
     } catch (err: any) {
       setLoginError(err.message);
     }
@@ -362,7 +502,10 @@ export default function App() {
         setBulkCodePrefix(initPrefix);
       }
       if (data.departments?.length > 0) {
-        setUploadDeptId(data.departments[0].id);
+        const initialDept = (currentUser?.role !== 'ADMIN' && currentUser?.department_id)
+          ? currentUser.department_id
+          : data.departments[0].id;
+        setUploadDeptId(initialDept);
         setNewUserDeptId(data.departments[0].id);
       }
       if (data.branches?.length > 0) setUploadBranchId(data.branches[0].id);
@@ -504,7 +647,8 @@ export default function App() {
     setPreviewModalFile({
       name: file.name,
       size: file.size,
-      url: url
+      url: url,
+      rawFile: file
     });
   };
 
@@ -606,6 +750,10 @@ export default function App() {
     setUploading(true);
 
     try {
+      const effectiveDeptId = (currentUser?.role !== 'ADMIN' && currentUser?.department_id) 
+        ? currentUser.department_id 
+        : uploadDeptId;
+
       if (isBulk) {
         if (bulkFiles.length === 0) {
           alert('กรุณาเลือกหรือสแกนไฟล์อย่างน้อย 1 ไฟล์');
@@ -615,7 +763,7 @@ export default function App() {
 
         const formData = new FormData();
         formData.append('category_id', uploadCatId.toString());
-        formData.append('department_id', uploadDeptId.toString());
+        formData.append('department_id', effectiveDeptId.toString());
         formData.append('branch_id', uploadBranchId.toString());
         formData.append('tags', uploadTags);
         formData.append('code_prefix', bulkCodePrefix);
@@ -649,7 +797,7 @@ export default function App() {
         formData.append('document_code', uploadCode);
         formData.append('document_date', uploadDate);
         formData.append('category_id', uploadCatId.toString());
-        formData.append('department_id', uploadDeptId.toString());
+        formData.append('department_id', effectiveDeptId.toString());
         formData.append('branch_id', uploadBranchId.toString());
         formData.append('tags', uploadTags);
         formData.append('is_public', uploadIsPublic ? 'true' : 'false');
@@ -668,7 +816,7 @@ export default function App() {
         setUploadTitle('');
         setUploadTags('');
         setUploadIsPublic(true);
-        setUploadAllowedDepts([]);
+        setUploadAllowedDepts(currentUser?.department_id ? [currentUser.department_id] : []);
         setUploadAllowedUsers([]);
         clearSingleFile();
         
@@ -1215,7 +1363,7 @@ export default function App() {
             </div>
             <div>
               <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>ยอดเงินรวมในระบบ</p>
-              <h3 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>฿{stats.total_amount_extracted.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</h3>
+              <h3 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{stats.total_amount_extracted.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</h3>
             </div>
           </div>
 
@@ -1262,7 +1410,7 @@ export default function App() {
                     <label className={`text-[11px] block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>ชื่อเอกสาร *</label>
                     <input
                       type="text"
-                      placeholder="เช่น ใบเสร็จจัดซื้ออุปกรณ์ IT"
+                      placeholder="เช่น ใบเสร็จจัดซื้ออุปกรณ์ IT, งบการเงิน Excel"
                       value={uploadTitle}
                       onChange={(e) => setUploadTitle(e.target.value)}
                       className={`w-full border rounded-lg px-3 py-2 text-xs outline-none transition ${isDark ? 'bg-[#1e293b] border-slate-700 text-white focus:border-cyan-500' : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-cyan-600'}`}
@@ -1347,11 +1495,18 @@ export default function App() {
                   </select>
                 </div>
                 <div>
-                  <label className={`text-[10px] block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>แผนกหลัก</label>
+                  <label className={`text-[10px] block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                    แผนกหลัก {currentUser?.role !== 'ADMIN' && <span className="text-amber-500 font-semibold">(เฉพาะแผนกคุณ)</span>}
+                  </label>
                   <select
                     value={uploadDeptId}
+                    disabled={currentUser?.role !== 'ADMIN'}
                     onChange={(e) => setUploadDeptId(Number(e.target.value))}
-                    className={`w-full border rounded-lg px-2 py-2 text-xs outline-none transition ${isDark ? 'bg-[#1e293b] border-slate-700 text-white focus:border-cyan-500' : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-cyan-600'}`}
+                    className={`w-full border rounded-lg px-2 py-2 text-xs outline-none transition ${
+                      currentUser?.role !== 'ADMIN'
+                        ? 'opacity-70 cursor-not-allowed bg-slate-800/50'
+                        : ''
+                    } ${isDark ? 'bg-[#1e293b] border-slate-700 text-white focus:border-cyan-500' : 'bg-slate-50 border-slate-300 text-slate-900 focus:border-cyan-600'}`}
                   >
                     {departments.map((d) => (
                       <option key={d.id} value={d.id}>{d.name}</option>
@@ -1406,7 +1561,12 @@ export default function App() {
                       type="radio" 
                       name="perm" 
                       checked={!uploadIsPublic} 
-                      onChange={() => setUploadIsPublic(false)} 
+                      onChange={() => {
+                        setUploadIsPublic(false);
+                        if (currentUser?.department_id) {
+                          setUploadAllowedDepts([currentUser.department_id]);
+                        }
+                      }} 
                     />
                     <span>จำกัดสิทธิ์ (Restricted)</span>
                   </label>
@@ -1461,7 +1621,7 @@ export default function App() {
 
               <div>
                 <label className={`text-[11px] block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                  {isBulk ? 'แนบไฟล์เอกสารหลายรายการ (Bulk)' : 'แนบไฟล์เอกสาร (PDF หรือ รูปภาพ)'}
+                  {isBulk ? 'แนบไฟล์เอกสารหลายรายการ (Bulk)' : 'แนบไฟล์เอกสาร (PDF, รูปภาพ หรือ Excel/CSV)'}
                 </label>
 
                 <div
@@ -1488,14 +1648,14 @@ export default function App() {
                     <p className={`text-[10px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>หรือคลิกเพื่อเลือกไฟล์จากเครื่อง</p>
                   </div>
                   <span className={`text-[9px] px-2.5 py-0.5 border rounded-full font-mono ${isDark ? 'bg-slate-800 border-slate-700 text-slate-400' : 'bg-slate-200 border-slate-300 text-slate-600'}`}>
-                    PDF, JPG, PNG — สูงสุด 50 MB/ไฟล์
+                    PDF, JPG, PNG, XLSX, XLS, CSV — สูงสุด 50 MB/ไฟล์
                   </span>
                 </div>
 
                 <input
                   ref={singleFileInputRef}
                   type="file"
-                  accept="application/pdf,image/png,image/jpeg"
+                  accept="application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,.xlsx,.xls,.csv"
                   onChange={handleSingleFileChange}
                   className="hidden"
                 />
@@ -1504,7 +1664,7 @@ export default function App() {
                   ref={bulkFileInputRef}
                   type="file"
                   multiple
-                  accept="application/pdf,image/png,image/jpeg"
+                  accept="application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,.xlsx,.xls,.csv"
                   onChange={handleBulkFileChange}
                   className="hidden"
                 />
@@ -1530,11 +1690,15 @@ export default function App() {
                 </button>
               </div>
 
-              {!isBulk && selectedSingleFile && previewBlobUrl && (
+              {!isBulk && selectedSingleFile && (
                 <div className="space-y-2">
                   <div className={`p-2.5 border rounded-xl flex items-center justify-between ${isDark ? 'bg-slate-900/80 border-cyan-500/30' : 'bg-slate-100 border-slate-200'}`}>
                     <div className="flex items-center gap-2 overflow-hidden">
-                      <FileIcon className="w-4 h-4 text-cyan-500 shrink-0" />
+                      {isExcelOrSpreadsheet(selectedSingleFile.name, selectedSingleFile.type) ? (
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0" />
+                      ) : (
+                        <FileIcon className="w-4 h-4 text-cyan-500 shrink-0" />
+                      )}
                       <div className="overflow-hidden">
                         <p className={`text-xs font-medium truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>{selectedSingleFile.name}</p>
                         <p className="text-[10px] text-slate-500">{formatFileSize(selectedSingleFile.size)}</p>
@@ -1563,15 +1727,23 @@ export default function App() {
                   </div>
 
                   <div className="relative group h-64 border border-slate-700/50 rounded-xl overflow-hidden bg-black/40">
-                    <iframe src={previewBlobUrl} className="w-full h-full border-0" title="Pre-upload preview" />
-                    <div 
-                      onClick={() => setShowFullPreviewModal(true)}
-                      className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer backdrop-blur-[2px]"
-                    >
-                      <span className="px-3 py-1.5 bg-cyan-600/90 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-lg">
-                        <Eye className="w-4 h-4" /> คลิกเพื่อดูขนาดใหญ่
-                      </span>
-                    </div>
+                    {isExcelOrSpreadsheet(selectedSingleFile.name, selectedSingleFile.type) ? (
+                      <ExcelSheetViewer fileBlob={selectedSingleFile} />
+                    ) : (
+                      previewBlobUrl && (
+                        <>
+                          <iframe src={previewBlobUrl} className="w-full h-full border-0" title="Pre-upload preview" />
+                          <div 
+                            onClick={() => setShowFullPreviewModal(true)}
+                            className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer backdrop-blur-[2px]"
+                          >
+                            <span className="px-3 py-1.5 bg-cyan-600/90 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shadow-lg">
+                              <Eye className="w-4 h-4" /> คลิกเพื่อดูขนาดใหญ่
+                            </span>
+                          </div>
+                        </>
+                      )
+                    )}
                   </div>
                 </div>
               )}
@@ -1594,7 +1766,11 @@ export default function App() {
                       className={`p-2 border rounded-lg flex items-center justify-between transition ${isDark ? 'bg-slate-900/80 border-slate-700/80 hover:border-cyan-500/30' : 'bg-slate-50 border-slate-200 hover:border-cyan-500'}`}
                     >
                       <div className="flex items-center gap-2 overflow-hidden flex-1 mr-2">
-                        <FileIcon className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                        {isExcelOrSpreadsheet(file.name, file.type) ? (
+                          <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                        ) : (
+                          <FileIcon className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+                        )}
                         <div className="overflow-hidden">
                           <p className={`text-[11px] truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>{file.name}</p>
                           <p className="text-[9px] text-slate-500">{formatFileSize(file.size)}</p>
@@ -1875,6 +2051,9 @@ export default function App() {
                         </td>
                         <td className={`py-3 px-3 font-medium max-w-[180px] ${isDark ? 'text-white' : 'text-slate-900'}`}>
                           <div className="flex items-center gap-1.5">
+                            {isExcelOrSpreadsheet(doc.file_name) && (
+                              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                            )}
                             <span className="truncate">{doc.title}</span>
                             <span className={`px-1.5 py-0.2 border rounded text-[9px] shrink-0 font-mono ${isDark ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20' : 'bg-cyan-50 text-cyan-700 border-cyan-200'}`}>
                               v{doc.current_version || 1}
@@ -1900,7 +2079,7 @@ export default function App() {
                         <td className="py-3 px-3">
                           {doc.is_public ? (
                             <span className="text-[10px] text-emerald-500 font-medium flex items-center gap-1">
-                              <ShieldCheck className="w-3 h-3" /> สาธารณะ
+                              <ShieldCheck className="w-3.5 h-3.5" /> สาธารณะ
                             </span>
                           ) : (
                             <span className="text-[10px] text-amber-500 font-medium flex items-center gap-1">
@@ -1943,12 +2122,16 @@ export default function App() {
       </main>
 
       {/* MODAL พรีวิวไฟล์เดี่ยว */}
-      {showFullPreviewModal && previewBlobUrl && selectedSingleFile && (
+      {showFullPreviewModal && selectedSingleFile && (
         <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
           <div className={`w-full max-w-5xl h-[88vh] border rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 ${isDark ? 'bg-[#0f172a] border-cyan-500/30' : 'bg-white border-slate-200'}`}>
             <div className={`px-6 py-3.5 border-b flex items-center justify-between ${isDark ? 'bg-[#131d33] border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
               <div className="flex items-center gap-2">
-                <FileIcon className="w-4 h-4 text-cyan-500" />
+                {isExcelOrSpreadsheet(selectedSingleFile.name, selectedSingleFile.type) ? (
+                  <FileSpreadsheet className="w-4 h-4 text-emerald-500" />
+                ) : (
+                  <FileIcon className="w-4 h-4 text-cyan-500" />
+                )}
                 <h3 className={`text-sm font-bold truncate max-w-lg ${isDark ? 'text-white' : 'text-slate-900'}`}>{selectedSingleFile.name}</h3>
                 <span className="text-[10px] text-slate-400 font-mono">({formatFileSize(selectedSingleFile.size)})</span>
               </div>
@@ -1960,12 +2143,18 @@ export default function App() {
               </button>
             </div>
             
-            <div className="flex-1 bg-slate-900/60">
-              <iframe src={previewBlobUrl} className="w-full h-full border-0" title="Full Pre-upload Preview" />
+            <div className="flex-1 bg-slate-900/60 overflow-hidden">
+              {isExcelOrSpreadsheet(selectedSingleFile.name, selectedSingleFile.type) ? (
+                <ExcelSheetViewer fileBlob={selectedSingleFile} />
+              ) : (
+                previewBlobUrl && (
+                  <iframe src={previewBlobUrl} className="w-full h-full border-0" title="Full Pre-upload Preview" />
+                )
+              )}
             </div>
 
             <div className={`px-6 py-2.5 border-t flex items-center justify-between ${isDark ? 'bg-[#131d33] border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
-              <span className="text-[11px] text-slate-400">ตรวจสอบความชัดเจนของเอกสารก่อนกดปุ่มอัปโหลด</span>
+              <span className="text-[11px] text-slate-400">ตรวจสอบความเรียบร้อยของเอกสารก่อนกดปุ่มอัปโหลด</span>
               <button
                 onClick={() => setShowFullPreviewModal(false)}
                 className="px-4 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-semibold transition"
@@ -1983,7 +2172,11 @@ export default function App() {
           <div className={`w-full max-w-5xl h-[88vh] border rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150 ${isDark ? 'bg-[#0f172a] border-cyan-500/30' : 'bg-white border-slate-200'}`}>
             <div className={`px-6 py-3.5 border-b flex items-center justify-between ${isDark ? 'bg-[#131d33] border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
               <div className="flex items-center gap-2">
-                <FileIcon className="w-4 h-4 text-cyan-500" />
+                {isExcelOrSpreadsheet(previewModalFile.name) ? (
+                  <FileSpreadsheet className="w-4 h-4 text-emerald-500" />
+                ) : (
+                  <FileIcon className="w-4 h-4 text-cyan-500" />
+                )}
                 <h3 className={`text-sm font-bold truncate max-w-lg ${isDark ? 'text-white' : 'text-slate-900'}`}>{previewModalFile.name}</h3>
                 <span className="text-[10px] text-slate-400 font-mono">({formatFileSize(previewModalFile.size)})</span>
               </div>
@@ -1995,8 +2188,16 @@ export default function App() {
               </button>
             </div>
             
-            <div className="flex-1 bg-slate-900/60">
-              <iframe src={previewModalFile.url} className="w-full h-full border-0" title="Bulk Pre-upload Preview" />
+            <div className="flex-1 bg-slate-900/60 overflow-hidden">
+              {isExcelOrSpreadsheet(previewModalFile.name) ? (
+                previewModalFile.rawFile ? (
+                  <ExcelSheetViewer fileBlob={previewModalFile.rawFile} />
+                ) : (
+                  <ExcelSheetViewer fileUrl={previewModalFile.url} />
+                )
+              ) : (
+                <iframe src={previewModalFile.url} className="w-full h-full border-0" title="Bulk Pre-upload Preview" />
+              )}
             </div>
 
             <div className={`px-6 py-2.5 border-t flex items-center justify-between ${isDark ? 'bg-[#131d33] border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
@@ -2145,6 +2346,9 @@ export default function App() {
             <div className={`px-6 py-4 border-b flex items-center justify-between ${isDark ? 'bg-[#131d33] border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
               <div>
                 <div className="flex items-center gap-2">
+                  {isExcelOrSpreadsheet(activeDoc.file_name, activeDoc.mime_type) && (
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0" />
+                  )}
                   <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{activeDoc.title}</h3>
                   <span className={`px-2 py-0.5 border rounded-md text-[10px] font-mono font-bold ${isDark ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : 'bg-cyan-100 text-cyan-800 border-cyan-200'}`}>
                     v{activeDoc.current_version || 1}
@@ -2174,7 +2378,7 @@ export default function App() {
                     ref={newVersionInputRef}
                     type="file"
                     className="hidden"
-                    accept="application/pdf,image/png,image/jpeg"
+                    accept="application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,.xlsx,.xls,.csv"
                     onChange={handleUploadNewVersion}
                   />
                 </label>
@@ -2209,7 +2413,11 @@ export default function App() {
               <div className={`border rounded-xl overflow-hidden flex flex-col h-[520px] ${isDark ? 'bg-[#070b14] border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
                 <div className={`px-4 py-2 border-b text-[11px] flex items-center justify-between ${isDark ? 'bg-[#0c1322] border-slate-800 text-slate-400' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
                   <div className="flex items-center gap-2">
-                    <FileText className="w-3.5 h-3.5 text-cyan-500" />
+                    {isExcelOrSpreadsheet(activeDoc.file_name, activeDoc.mime_type) ? (
+                      <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500" />
+                    ) : (
+                      <FileText className="w-3.5 h-3.5 text-cyan-500" />
+                    )}
                     เอกสารต้นฉบับ ({activeDoc.file_name})
                   </div>
                   <button
@@ -2234,12 +2442,16 @@ export default function App() {
                     ))}
                   </div>
                 ) : (
-                  <div className="flex-1 bg-slate-900/40">
-                    <iframe
-                      src={getSafePreviewUrl(activeDoc.download_url)}
-                      className="w-full h-full border-0"
-                      title="Document Preview"
-                    />
+                  <div className="flex-1 bg-slate-900/40 overflow-hidden">
+                    {isExcelOrSpreadsheet(activeDoc.file_name, activeDoc.mime_type) ? (
+                      <ExcelSheetViewer fileUrl={getSafePreviewUrl(activeDoc.download_url)} />
+                    ) : (
+                      <iframe
+                        src={getSafePreviewUrl(activeDoc.download_url)}
+                        className="w-full h-full border-0"
+                        title="Document Preview"
+                      />
+                    )}
                   </div>
                 )}
               </div>
@@ -2299,7 +2511,7 @@ export default function App() {
                           inspectorTab === 'ocr' ? 'bg-cyan-600 text-white' : isDark ? 'text-slate-400 hover:text-white bg-slate-800/60' : 'text-slate-600 hover:text-slate-900 bg-slate-200'
                         }`}
                       >
-                        <Edit3 className="w-3.5 h-3.5" /> ข้อความ OCR
+                        <Edit3 className="w-3.5 h-3.5" /> ข้อความสกัดได้ (Text/OCR)
                       </button>
                       <button
                         type="button"
@@ -2440,9 +2652,9 @@ export default function App() {
             </div>
 
             <div className="mb-6">
-              <h4 className="text-xs font-bold text-slate-700 mb-2">เนื้อหาเอกสาร (OCR Extracted Text):</h4>
+              <h4 className="text-xs font-bold text-slate-700 mb-2">เนื้อหาเอกสาร (OCR / Extracted Text):</h4>
               <div className="p-3 bg-slate-100 rounded-lg text-[11px] font-mono leading-relaxed text-slate-700 max-h-48 overflow-y-auto whitespace-pre-wrap border border-slate-200">
-                {activeDoc.extracted_text || 'ไม่มีข้อมูล OCR'}
+                {activeDoc.extracted_text || 'ไม่มีข้อมูลข้อความในเอกสาร'}
               </div>
             </div>
 

@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import csv
 import json
 import shutil
 import psycopg2
@@ -10,6 +11,12 @@ from PIL import Image, ImageEnhance
 import fitz  # PyMuPDF
 import pytesseract
 import redis
+
+# รองรับเปิดอ่านไฟล์ Excel
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 from app.core.config import settings
 from app.services.storage import get_minio_client
@@ -55,6 +62,38 @@ def preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
     table = [0 if i < threshold else 255 for i in range(256)]
     binary = contrasted.point(table, '1')
     return binary
+
+def extract_excel_text(file_bytes: bytes, file_name: str) -> str:
+    """แยกข้อความจากไฟล์ตาราง Excel (.xlsx, .xls) หรือ CSV ออกมาเป็นข้อความล้วน"""
+    text_lines = []
+    lower_name = file_name.lower()
+
+    if lower_name.endswith('.csv'):
+        try:
+            decoded = file_bytes.decode('utf-8-sig', errors='ignore')
+            reader = csv.reader(io.StringIO(decoded))
+            for row in reader:
+                filtered_cells = [str(c).strip() for c in row if str(c).strip()]
+                if filtered_cells:
+                    text_lines.append(" | ".join(filtered_cells))
+            return "\n".join(text_lines)
+        except Exception:
+            return ""
+
+    if openpyxl and lower_name.endswith(('.xlsx', '.xlsm', '.xltx', '.xltm')):
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+            for sheet in wb.worksheets:
+                text_lines.append(f"--- Sheet: {sheet.title} ---")
+                for row in sheet.iter_rows(values_only=True):
+                    row_vals = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
+                    if row_vals:
+                        text_lines.append(" | ".join(row_vals))
+            return "\n".join(text_lines)
+        except Exception:
+            pass
+
+    return ""
 
 def extract_structured_json(text: str) -> dict:
     tax = re.search(r'(?:tax|เลขประจำตัวผู้เสียภาษี|ผู้เสียภาษี)[:\s]*(\d{13}|\d{1}-\d{4}-\d{5}-\d{2}-\d{1})', text, re.IGNORECASE)
@@ -127,6 +166,8 @@ def auto_generate_tags(text: str, current_tags: str = "") -> str:
         tags.add('#สหกิจศึกษา')
     if any(k in lower_text for k in ['ด่วน', 'urgent', 'ด่วนที่สุด']):
         tags.add('#ด่วน')
+    if any(k in lower_text for k in ['excel', 'sheet', 'สเปรดชีต']):
+        tags.add('#สเปรดชีต')
 
     meta = extract_structured_json(text)
     if meta["grand_total"] and meta["grand_total"] >= 50000:
@@ -168,15 +209,19 @@ def process_document_ocr(self, document_id: str, storage_key: str, file_name: st
         response.release_conn()
 
         extracted_text = ""
+        lower_name = file_name.lower()
 
-        # ⭐️ สกัดข้อความตามตำแหน่งพิกัดจริงบนหน้ากระดาษ (Top-to-Bottom) ⭐️
-        if file_name.lower().endswith('.pdf'):
+        # 1. กรณีเป็นไฟล์ Excel / CSV
+        if lower_name.endswith(('.xlsx', '.xls', '.csv')):
+            extracted_text = extract_excel_text(file_bytes, file_name)
+
+        # 2. กรณีเป็นไฟล์ PDF
+        elif lower_name.endswith('.pdf'):
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             full_text = []
 
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                # ⭐️ ใส่ sort=True เพื่อเรียงลำดับพิกัดจากบนลงล่างตามสายตามนุษย์ ⭐️
                 direct_text = page.get_text("text", sort=True)
 
                 if len(direct_text.strip()) > 30:
@@ -198,6 +243,8 @@ def process_document_ocr(self, document_id: str, storage_key: str, file_name: st
                             full_text.append(direct_text.strip())
 
             extracted_text = "\n\n".join(full_text)
+
+        # 3. กรณีเป็นไฟล์รูปภาพ (JPG, PNG)
         else:
             try:
                 raw_img = Image.open(io.BytesIO(file_bytes))
