@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
+    DMS_ADMIN_USERNAME: str = ""
+    DMS_ADMIN_PASSWORD: str = ""
+    DMS_ADMIN_FULL_NAME: str = "System Administrator"
+    DMS_ADMIN_DEPARTMENT_ID: int = 1
+
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""
     GITHUB_REDIRECT_URI: str = "http://localhost:8000/api/auth/github/callback"

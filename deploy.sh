@@ -164,7 +164,8 @@ preflight() {
 
   for key in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB DATABASE_URL \
     MINIO_ENDPOINT MINIO_PORT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_PUBLIC_URL MINIO_BUCKET_NAME \
-    JWT_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GITHUB_ALLOWED_EMAILS GITHUB_ADMIN_EMAILS TRAEFIK_NETWORK; do
+    JWT_SECRET DMS_ADMIN_USERNAME DMS_ADMIN_PASSWORD DMS_ADMIN_FULL_NAME DMS_ADMIN_DEPARTMENT_ID \
+    GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET GITHUB_ALLOWED_EMAILS GITHUB_ADMIN_EMAILS TRAEFIK_NETWORK; do
     require_env "$key"
   done
 
@@ -255,6 +256,11 @@ build_images() {
 deploy_stack() {
   info "Starting PostgreSQL and Redis"
   compose up -d --remove-orphans --wait --wait-timeout 120 postgres redis
+
+  info "Creating or updating the application administrator"
+  compose run --rm --no-deps backend python -m app.scripts.bootstrap_admin \
+    || die "Unable to bootstrap the application administrator"
+  ok "Application administrator is ready"
 
   info "Verifying shared MinIO access and bucket"
   compose run --rm --no-deps backend python -c \
