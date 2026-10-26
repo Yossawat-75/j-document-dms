@@ -1,0 +1,163 @@
+name: ${COMPOSE_PROJECT_NAME:-j-document-dms-uat}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: j-document-dms-uat-postgres
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.uat}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 10
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: j-document-dms-uat-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 10
+    networks:
+      - internal
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: j-document-dms-backend:${IMAGE_TAG:-uat}
+    container_name: j-document-dms-uat-api
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.uat}
+    environment:
+      PYTHONUNBUFFERED: "1"
+    expose:
+      - "8000"
+    volumes:
+      - scanner_inbox:/app/scanner_inbox
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      start_period: 20s
+      retries: 8
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik_net}"
+      - "traefik.http.middlewares.j-document-dms-uat-api-strip.stripprefix.prefixes=${DMS_BASE_PATH:?set DMS_BASE_PATH}"
+      - "traefik.http.routers.j-document-dms-uat-api.rule=Host(`${API_DOMAIN:?set API_DOMAIN}`) && PathPrefix(`${DMS_BASE_PATH:?set DMS_BASE_PATH}`)"
+      - "traefik.http.routers.j-document-dms-uat-api.priority=${TRAEFIK_PRIORITY:-120}"
+      - "traefik.http.routers.j-document-dms-uat-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.j-document-dms-uat-api.tls=true"
+      - "traefik.http.routers.j-document-dms-uat-api.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.j-document-dms-uat-api.middlewares=j-document-dms-uat-api-strip"
+      - "traefik.http.services.j-document-dms-uat-api.loadbalancer.server.port=8000"
+    networks:
+      - internal
+      - traefik
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: j-document-dms-backend:${IMAGE_TAG:-uat}
+    container_name: j-document-dms-uat-worker
+    hostname: j-document-dms-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.workers.ocr_worker", "worker", "--loglevel=info", "--concurrency=2"]
+    stop_grace_period: 90s
+    env_file:
+      - ${ENV_FILE:-.env.uat}
+    environment:
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.ocr_worker inspect ping --destination celery@j-document-dms-worker --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+    networks:
+      - internal
+      - traefik
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        BUILD_MODE: uat
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:?set VITE_API_BASE_URL}
+        VITE_BASE_PATH: ${VITE_BASE_PATH:?set VITE_BASE_PATH}
+    image: j-document-dms-frontend:${IMAGE_TAG:-uat}
+    container_name: j-document-dms-uat-web
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 4
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik_net}"
+      - "traefik.http.middlewares.j-document-dms-uat-web-strip.stripprefix.prefixes=${DMS_BASE_PATH:?set DMS_BASE_PATH}"
+      - "traefik.http.routers.j-document-dms-uat-web.rule=Host(`${APP_DOMAIN:?set APP_DOMAIN}`) && PathPrefix(`${DMS_BASE_PATH:?set DMS_BASE_PATH}`)"
+      - "traefik.http.routers.j-document-dms-uat-web.priority=${TRAEFIK_PRIORITY:-120}"
+      - "traefik.http.routers.j-document-dms-uat-web.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.j-document-dms-uat-web.tls=true"
+      - "traefik.http.routers.j-document-dms-uat-web.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}"
+      - "traefik.http.routers.j-document-dms-uat-web.middlewares=j-document-dms-uat-web-strip"
+      - "traefik.http.services.j-document-dms-uat-web.loadbalancer.server.port=80"
+    networks:
+      - traefik
+
+volumes:
+  postgres_data:
+  redis_data:
+  scanner_inbox:
+
+networks:
+  internal:
+    driver: bridge
+    internal: true
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik_net}

@@ -39,7 +39,7 @@ celery_app.conf.update(
     enable_utc=True,
 )
 
-BUCKET_NAME = getattr(settings, "MINIO_BUCKET_NAME", getattr(settings, "MINIO_BUCKET", "dms-documents"))
+BUCKET_NAME = settings.MINIO_BUCKET_NAME
 redis_client = redis.Redis.from_url(BROKER_URL, decode_responses=True)
 
 def invalidate_cache(pattern: str = "dms:*"):

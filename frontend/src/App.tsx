@@ -10,7 +10,8 @@ import {
   Camera, SwitchCamera, ScanLine, Sun, Moon, Maximize2, Lock, ShieldCheck
 } from 'lucide-react';
 
-const API_BASE = "http://localhost:8000/api";
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api").replace(/\/+$/, "");
+const LOGO_URL = `${import.meta.env.BASE_URL}jib-logo.png`;
 
 const getSafePreviewUrl = (url: string | undefined | null) => {
   if (!url) return '';
@@ -171,6 +172,7 @@ interface User {
   role: string;
   department_id?: number;
   department_name?: string;
+  token?: string;
 }
 
 interface DocItem {
@@ -236,8 +238,9 @@ export default function App() {
   });
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const oauthData = params.get('oauth_success');
+    const queryParams = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const oauthData = hashParams.get('oauth_success') || queryParams.get('oauth_success');
     if (oauthData) {
       try {
         const userObj = JSON.parse(decodeURIComponent(oauthData));
@@ -462,10 +465,6 @@ export default function App() {
       
       sessionStorage.setItem('dms_user', JSON.stringify(data.user));
       setCurrentUser(data.user);
-      if (data.user.department_id && data.user.role !== 'ADMIN') {
-        setUploadDeptId(data.user.department_id);
-        setUploadAllowedDepts([data.user.department_id]);
-      }
     } catch (err: any) {
       setLoginError(err.message);
     }
@@ -1158,7 +1157,7 @@ export default function App() {
         <div className={`w-full max-w-md border rounded-2xl p-8 shadow-2xl backdrop-blur-xl transition-colors duration-300 ${isDark ? 'bg-[#0f172a] border-cyan-500/20' : 'bg-white border-slate-200'}`}>
           <div className="flex flex-col items-center mb-6">
             <div className={`p-3 bg-white rounded-2xl mb-3 shadow-xl flex items-center justify-center w-28 h-16 border ${isDark ? 'border-transparent shadow-cyan-500/10' : 'border-slate-200 shadow-slate-200'}`}>
-              <img src="/jib-logo.png" alt="J-Document Logo" className="max-h-full max-w-full object-contain" />
+              <img src={LOGO_URL} alt="J-Document Logo" className="max-h-full max-w-full object-contain" />
             </div>
             <h1 className={`text-2xl font-bold tracking-wide ${isDark ? 'text-white' : 'text-slate-900'}`}>J-Document DMS</h1>
             <p className={`text-xs mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>ระบบจัดการเอกสารดิจิทัล</p>
@@ -1228,7 +1227,7 @@ export default function App() {
           {/* ปุ่มล็อกอินด้วย GitHub */}
           <div className="space-y-2.5">
             <a
-              href="http://localhost:8000/api/auth/github"
+              href={`${API_BASE}/auth/github`}
               className={`w-full py-2.5 px-4 rounded-xl border flex items-center justify-center gap-3 text-xs font-semibold transition shadow-sm ${
                 isDark 
                   ? 'bg-[#171e2e] hover:bg-[#1e273b] border-slate-700 text-slate-200' 
@@ -1259,7 +1258,7 @@ export default function App() {
       <header className={`border-b sticky top-0 z-30 px-6 py-3 flex items-center justify-between backdrop-blur-md transition-colors duration-300 ${isDark ? 'border-slate-800 bg-[#0c1322]/80' : 'border-slate-200 bg-white/85 shadow-sm'}`}>
         <div className="flex items-center gap-3">
           <div className="p-1.5 bg-white rounded-lg shadow-sm flex items-center justify-center w-12 h-9 border border-slate-200">
-            <img src="/jib-logo.png" alt="J-Document Logo" className="max-h-full max-w-full object-contain" />
+            <img src={LOGO_URL} alt="J-Document Logo" className="max-h-full max-w-full object-contain" />
           </div>
           <div>
             <h1 className={`text-base font-bold tracking-wide ${isDark ? 'text-white' : 'text-slate-900'}`}>J-Document DMS</h1>
@@ -2603,7 +2602,7 @@ export default function App() {
           <div className="w-full max-w-2xl bg-white text-slate-900 rounded-2xl shadow-2xl p-8 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b pb-4 mb-6">
               <div className="flex items-center gap-3">
-                <img src="/jib-logo.png" alt="Logo" className="h-10 object-contain" />
+                <img src={LOGO_URL} alt="Logo" className="h-10 object-contain" />
                 <div>
                   <h2 className="text-lg font-bold">ใบสรุปข้อมูลเอกสาร (Document Slip)</h2>
                   <p className="text-xs text-slate-500">J-Document Digital Management System</p>

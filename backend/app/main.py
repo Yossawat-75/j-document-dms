@@ -10,12 +10,13 @@ import asyncio
 import mimetypes
 import urllib.request
 import urllib.parse
+import secrets
 import jwt
 import redis
 from datetime import date, datetime, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse, RedirectResponse
+from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import psycopg2
@@ -38,28 +39,29 @@ def get_password_hash(password: str) -> str:
 
 app = FastAPI(title="J-Document DMS API", version="1.0.0")
 
-JWT_SECRET = "docu-sense-secret-key-2026"
-JWT_ALGORITHM = "HS256"
-BUCKET_NAME = getattr(settings, "MINIO_BUCKET_NAME", getattr(settings, "MINIO_BUCKET", "dms-documents"))
+JWT_SECRET = settings.JWT_SECRET
+JWT_ALGORITHM = settings.JWT_ALGORITHM
+BUCKET_NAME = settings.MINIO_BUCKET_NAME
 SCANNER_INBOX_DIR = "/app/scanner_inbox"
-REDIS_URL = getattr(settings, "REDIS_URL", "redis://redis:6379/0")
+REDIS_URL = settings.REDIS_URL
 
-# OAuth Credentials
-GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID", "Ov23liLfDAG5oh8JAw9k")
-GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "d833d3490bed807e7207b7ba14b311da224e2886")
+GITHUB_CLIENT_ID = settings.GITHUB_CLIENT_ID
+GITHUB_CLIENT_SECRET = settings.GITHUB_CLIENT_SECRET
+GITHUB_REDIRECT_URI = settings.GITHUB_REDIRECT_URI
 
-MS_CLIENT_ID = os.getenv("MS_CLIENT_ID", "")
-MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET", "")
-MS_TENANT_ID = os.getenv("MS_TENANT_ID", "common")
+MS_CLIENT_ID = settings.MS_CLIENT_ID
+MS_CLIENT_SECRET = settings.MS_CLIENT_SECRET
+MS_TENANT_ID = settings.MS_TENANT_ID
+MS_REDIRECT_URI = settings.MS_REDIRECT_URI
 
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 def get_db_connection():
@@ -99,11 +101,29 @@ def init_db_schema():
         cur = conn.cursor()
         cur.execute("ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS structured_data jsonb;")
         cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS department_id integer REFERENCES departments(id);")
+        cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS file_hash varchar(64);")
+        cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS current_version integer DEFAULT 1;")
         cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS view_count integer DEFAULT 0;")
         cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_public boolean DEFAULT true;")
         cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS uploader_username varchar(100);")
         cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS allowed_department_ids integer[] DEFAULT '{}';")
         cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS allowed_user_ids integer[] DEFAULT '{}';")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS document_versions (
+                id bigserial PRIMARY KEY,
+                document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                version integer NOT NULL,
+                file_name varchar(255) NOT NULL,
+                storage_key varchar(255) NOT NULL,
+                mime_type varchar(100),
+                file_hash varchar(64),
+                created_by varchar(100) NOT NULL,
+                created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (document_id, version)
+            );
+            """
+        )
         conn.commit()
         cur.close()
         conn.close()
@@ -197,6 +217,30 @@ async def startup_event():
     init_db_schema()
     asyncio.create_task(watch_scanner_folder())
 
+
+@app.get("/health/live", include_in_schema=False)
+def health_live():
+    return {"status": "ok", "service": "j-document-dms-api"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready():
+    conn = None
+    minio_client = get_minio_client()
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1;")
+        redis_client.ping()
+        if not minio_client.bucket_exists(BUCKET_NAME):
+            return JSONResponse(status_code=503, content={"status": "not_ready"})
+        return {"status": "ready", "service": "j-document-dms-api"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "not_ready"})
+    finally:
+        if conn is not None:
+            conn.close()
+
 # Models
 class LoginRequest(BaseModel):
     username: str
@@ -247,7 +291,7 @@ def login(req: LoginRequest):
             "role": user["role"],
             "full_name": user["full_name"],
             "department_id": user.get("department_id"),
-            "exp": datetime.utcnow() + timedelta(hours=24)
+            "exp": datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         }
         token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
         record_audit_log(user["username"], "LOGIN", None, f"User {user['username']} logged in")
@@ -269,49 +313,125 @@ def login(req: LoginRequest):
 
 @app.get("/api/auth/github")
 def login_github():
-    if GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET:
-        redirect_uri = "http://localhost:8000/api/auth/github/callback"
-        return RedirectResponse(f"https://github.com/login/oauth/authorize?client_id={GITHUB_CLIENT_ID}&redirect_uri={redirect_uri}&scope=read:user,user:email")
-    return RedirectResponse("http://localhost:8000/api/auth/oauth/mock-direct?provider=github")
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        if settings.ALLOW_MOCK_OAUTH and settings.APP_ENV == "development":
+            return RedirectResponse(f"{settings.api_public_base_url}/api/auth/oauth/mock-direct?provider=github")
+        raise HTTPException(status_code=503, detail="GitHub login is not configured")
+
+    state = secrets.token_urlsafe(32)
+    try:
+        redis_client.setex(f"dms:oauth:github:{state}", 600, "1")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Authentication service is temporarily unavailable")
+
+    query = urllib.parse.urlencode({
+        "client_id": GITHUB_CLIENT_ID,
+        "redirect_uri": GITHUB_REDIRECT_URI,
+        "scope": "read:user user:email",
+        "state": state,
+    })
+    response = RedirectResponse(f"https://github.com/login/oauth/authorize?{query}")
+    response.set_cookie(
+        "dms_github_oauth_state",
+        state,
+        max_age=600,
+        httponly=True,
+        secure=settings.COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+    return response
+
 
 @app.get("/api/auth/github/callback")
-def github_callback(code: str):
+def github_callback(code: str, state: str, request: Request):
+    cookie_state = request.cookies.get("dms_github_oauth_state")
+    if not cookie_state or not secrets.compare_digest(cookie_state, state):
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+
+    try:
+        stored_state = redis_client.getdel(f"dms:oauth:github:{state}")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Authentication service is temporarily unavailable")
+    if stored_state is None:
+        raise HTTPException(status_code=400, detail="OAuth request expired or was already used")
+
     token_url = "https://github.com/login/oauth/access_token"
     data = urllib.parse.urlencode({
         "client_id": GITHUB_CLIENT_ID,
         "client_secret": GITHUB_CLIENT_SECRET,
-        "code": code
+        "code": code,
+        "redirect_uri": GITHUB_REDIRECT_URI,
     }).encode("utf-8")
-    
-    req = urllib.request.Request(token_url, data=data, headers={"Accept": "application/json"})
+
+    token_request = urllib.request.Request(token_url, data=data, headers={"Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req) as resp:
-            token_data = json.loads(resp.read().decode())
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"ไม่สามารถเชื่อมต่อกับ GitHub ได้: {str(e)}")
+        with urllib.request.urlopen(token_request, timeout=10) as response:
+            token_data = json.loads(response.read().decode())
+    except Exception:
+        raise HTTPException(status_code=502, detail="GitHub authentication is temporarily unavailable")
 
     access_token = token_data.get("access_token")
     if not access_token:
-        raise HTTPException(status_code=400, detail="ไม่ได้รับ Access Token จาก GitHub")
+        raise HTTPException(status_code=401, detail="GitHub authentication failed")
 
-    user_req = urllib.request.Request("https://api.github.com/user", headers={
+    user_request = urllib.request.Request("https://api.github.com/user", headers={
         "Authorization": f"Bearer {access_token}",
-        "User-Agent": "J-Document-DMS"
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "J-Document-DMS",
+        "X-GitHub-Api-Version": "2022-11-28",
     })
-    with urllib.request.urlopen(user_req) as resp:
-        gh_user = json.loads(resp.read().decode())
+    email_request = urllib.request.Request("https://api.github.com/user/emails", headers={
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "J-Document-DMS",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    try:
+        with urllib.request.urlopen(user_request, timeout=10) as response:
+            github_user = json.loads(response.read().decode())
+        with urllib.request.urlopen(email_request, timeout=10) as response:
+            github_email_items = json.loads(response.read().decode())
+    except Exception:
+        raise HTTPException(status_code=502, detail="Unable to load the GitHub user profile")
 
-    username = f"gh_{gh_user.get('login')}"
-    full_name = gh_user.get('name') or gh_user.get('login')
-    return handle_oauth_user_session(username, full_name, "GitHub")
+    github_login = str(github_user.get("login") or "").strip()
+    if not github_login or not isinstance(github_email_items, list):
+        raise HTTPException(status_code=401, detail="GitHub authentication failed")
+
+    verified_emails = {
+        str(item.get("email") or "").strip().lower()
+        for item in github_email_items
+        if isinstance(item, dict) and item.get("verified") is True and item.get("email")
+    }
+    allowed_emails = settings.github_allowed_emails | settings.github_admin_emails
+    if not verified_emails.intersection(allowed_emails):
+        raise HTTPException(status_code=403, detail="This verified GitHub email is not allowed")
+
+    username = f"gh_{github_login}"
+    full_name = github_user.get("name") or github_login
+    default_role = "ADMIN" if verified_emails.intersection(settings.github_admin_emails) else "USER"
+    response = handle_oauth_user_session(username, full_name, "GitHub", default_role)
+    response.delete_cookie("dms_github_oauth_state", path="/")
+    return response
+
 
 @app.get("/api/auth/microsoft")
 def login_microsoft():
-    if MS_CLIENT_ID and MS_CLIENT_SECRET:
-        redirect_uri = "http://localhost:8000/api/auth/microsoft/callback"
-        auth_url = f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/authorize?client_id={MS_CLIENT_ID}&response_type=code&redirect_uri={redirect_uri}&response_mode=query&scope=User.Read"
-        return RedirectResponse(auth_url)
-    return RedirectResponse("http://localhost:8000/api/auth/oauth/mock-direct?provider=microsoft")
+    if not MS_CLIENT_ID or not MS_CLIENT_SECRET:
+        if settings.ALLOW_MOCK_OAUTH and settings.APP_ENV == "development":
+            return RedirectResponse(f"{settings.api_public_base_url}/api/auth/oauth/mock-direct?provider=microsoft")
+        raise HTTPException(status_code=503, detail="Microsoft login is not configured")
+
+    query = urllib.parse.urlencode({
+        "client_id": MS_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": MS_REDIRECT_URI,
+        "response_mode": "query",
+        "scope": "User.Read",
+    })
+    return RedirectResponse(f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/authorize?{query}")
+
 
 @app.get("/api/auth/microsoft/callback")
 def microsoft_callback(code: str):
@@ -320,52 +440,60 @@ def microsoft_callback(code: str):
         "client_id": MS_CLIENT_ID,
         "client_secret": MS_CLIENT_SECRET,
         "code": code,
-        "redirect_uri": "http://localhost:8000/api/auth/microsoft/callback",
-        "grant_type": "authorization_code"
+        "redirect_uri": MS_REDIRECT_URI,
+        "grant_type": "authorization_code",
     }).encode("utf-8")
 
-    req = urllib.request.Request(token_url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    token_request = urllib.request.Request(token_url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
     try:
-        with urllib.request.urlopen(req) as resp:
-            token_data = json.loads(resp.read().decode())
+        with urllib.request.urlopen(token_request, timeout=10) as response:
+            token_data = json.loads(response.read().decode())
     except Exception:
-        raise HTTPException(status_code=400, detail="ไม่สามารถเชื่อมต่อกับ Microsoft ได้")
+        raise HTTPException(status_code=502, detail="Microsoft authentication is temporarily unavailable")
 
     access_token = token_data.get("access_token")
     if not access_token:
-        raise HTTPException(status_code=400, detail="ไม่ได้รับ Access Token จาก Microsoft")
+        raise HTTPException(status_code=401, detail="Microsoft authentication failed")
 
-    user_req = urllib.request.Request("https://graph.microsoft.com/v1.0/me", headers={
-        "Authorization": f"Bearer {access_token}"
+    user_request = urllib.request.Request("https://graph.microsoft.com/v1.0/me", headers={
+        "Authorization": f"Bearer {access_token}",
     })
-    with urllib.request.urlopen(user_req) as resp:
-        ms_user = json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(user_request, timeout=10) as response:
+            microsoft_user = json.loads(response.read().decode())
+    except Exception:
+        raise HTTPException(status_code=502, detail="Unable to load the Microsoft user profile")
 
-    username = f"ms_{ms_user.get('userPrincipalName', '').split('@')[0]}"
-    full_name = ms_user.get('displayName') or "Microsoft Member"
+    username = f"ms_{microsoft_user.get('userPrincipalName', '').split('@')[0]}"
+    full_name = microsoft_user.get("displayName") or "Microsoft Member"
     return handle_oauth_user_session(username, full_name, "Microsoft Teams")
+
 
 @app.get("/api/auth/oauth/mock-direct")
 def mock_oauth_direct(provider: str):
+    if not settings.ALLOW_MOCK_OAUTH or settings.APP_ENV != "development":
+        raise HTTPException(status_code=404, detail="Not found")
     provider_name = "Microsoft Teams" if provider == "microsoft" else "GitHub"
     username = f"{provider}_user"
     full_name = f"{provider_name} Member"
     return handle_oauth_user_session(username, full_name, provider_name)
 
-def handle_oauth_user_session(username: str, full_name: str, provider_name: str):
+
+def handle_oauth_user_session(username: str, full_name: str, provider_name: str, default_role: str = "USER"):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         cur.execute("SELECT * FROM users WHERE username = %s;", (username,))
         user = cur.fetchone()
         if not user:
+            random_password_hash = get_password_hash(secrets.token_urlsafe(48))
             cur.execute(
                 """
                 INSERT INTO users (username, password_hash, full_name, role, department_id)
-                VALUES (%s, %s, %s, 'USER', 1)
+                VALUES (%s, %s, %s, %s, 1)
                 RETURNING id, username, full_name, role, department_id;
                 """,
-                (username, get_password_hash("oauth_secret_default_pass"), full_name)
+                (username, random_password_hash, full_name, default_role),
             )
             user = cur.fetchone()
             conn.commit()
@@ -376,7 +504,7 @@ def handle_oauth_user_session(username: str, full_name: str, provider_name: str)
             "role": user["role"],
             "full_name": user["full_name"],
             "department_id": user.get("department_id"),
-            "exp": datetime.utcnow() + timedelta(hours=24)
+            "exp": datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
         }
         token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
         record_audit_log(user["username"], "SSO_LOGIN", None, f"Logged in with {provider_name}")
@@ -387,9 +515,10 @@ def handle_oauth_user_session(username: str, full_name: str, provider_name: str)
             "full_name": user["full_name"],
             "role": user["role"],
             "department_id": user.get("department_id"),
-            "token": token
+            "token": token,
         }))
-        return RedirectResponse(f"http://localhost:3000?oauth_success={user_data}")
+        app_url = settings.PUBLIC_APP_URL.rstrip("/")
+        return RedirectResponse(f"{app_url}/#oauth_success={user_data}")
     finally:
         cur.close()
         conn.close()
@@ -1304,7 +1433,7 @@ def get_document_detail(document_id: str, username: Optional[str] = Query("syste
         
         raw_text = ext["raw_text"] if ext and ext.get("raw_text") else ""
         structured_data = extract_structured_json(raw_text)
-        download_url = f"http://localhost:8000/api/documents/{doc['id']}/file"
+        download_url = f"{settings.api_public_base_url}/api/documents/{doc['id']}/file"
 
         record_audit_log(username, "VIEW", str(doc["id"]), f"Inspected document {doc['document_code']} (Total Views: {current_view_count})")
 
