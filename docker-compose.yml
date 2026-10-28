@@ -67,6 +67,12 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_default}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      # GitHub OAuth Config (Local)
+      GITHUB_CLIENT_ID: "Ov23liLfDAG5oh8JAw9k"
+      GITHUB_CLIENT_SECRET: "d833d3490bed807e7207b7ba14b311da224e2886"
+      GITHUB_REDIRECT_URI: "http://localhost:8000/api/auth/github/callback"
+      GITHUB_ADMIN_EMAILS: "1166109051019@mail.rmutt.ac.th"
+      GITHUB_ALLOWED_EMAILS: "1166109051019@mail.rmutt.ac.th"
     ports:
       - "8000:8000"
     depends_on:
