@@ -25,7 +25,8 @@ from passlib.context import CryptContext
 
 from app.core.config import settings
 from app.services.storage import upload_file_to_minio, get_file_download_url, delete_file_from_minio, get_minio_client
-from app.workers.ocr_worker import process_document_ocr, extract_structured_json
+# ⭐️ Import do_process_document มาใช้งานตรงๆ ด้วย
+from app.workers.ocr_worker import process_document_ocr, extract_structured_json, do_process_document
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -217,11 +218,9 @@ async def startup_event():
     init_db_schema()
     asyncio.create_task(watch_scanner_folder())
 
-
 @app.get("/health/live", include_in_schema=False)
 def health_live():
     return {"status": "ok", "service": "j-document-dms-api"}
-
 
 @app.get("/health/ready", include_in_schema=False)
 def health_ready():
@@ -342,7 +341,6 @@ def login_github():
     )
     return response
 
-
 @app.get("/api/auth/github/callback")
 def github_callback(code: str, state: str, request: Request):
     cookie_state = request.cookies.get("dms_github_oauth_state")
@@ -415,7 +413,6 @@ def github_callback(code: str, state: str, request: Request):
     response.delete_cookie("dms_github_oauth_state", path="/")
     return response
 
-
 @app.get("/api/auth/microsoft")
 def login_microsoft():
     if not MS_CLIENT_ID or not MS_CLIENT_SECRET:
@@ -431,7 +428,6 @@ def login_microsoft():
         "scope": "User.Read",
     })
     return RedirectResponse(f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/authorize?{query}")
-
 
 @app.get("/api/auth/microsoft/callback")
 def microsoft_callback(code: str):
@@ -468,7 +464,6 @@ def microsoft_callback(code: str):
     full_name = microsoft_user.get("displayName") or "Microsoft Member"
     return handle_oauth_user_session(username, full_name, "Microsoft Teams")
 
-
 @app.get("/api/auth/oauth/mock-direct")
 def mock_oauth_direct(provider: str):
     if not settings.ALLOW_MOCK_OAUTH or settings.APP_ENV != "development":
@@ -477,7 +472,6 @@ def mock_oauth_direct(provider: str):
     username = f"{provider}_user"
     full_name = f"{provider_name} Member"
     return handle_oauth_user_session(username, full_name, provider_name)
-
 
 def handle_oauth_user_session(username: str, full_name: str, provider_name: str, default_role: str = "USER"):
     conn = get_db_connection()
@@ -781,7 +775,7 @@ def delete_user(user_id: int, current_username: Optional[str] = Query("admin")):
         cur.close()
         conn.close()
 
-# 4. Analytics Stats
+# 4. Analytics Stats (ยอดเงินแยกตามประเภทเอกสาร)
 @app.get("/api/analytics/stats")
 def get_dashboard_stats():
     cache_key = "dms:stats:dashboard"
@@ -803,14 +797,30 @@ def get_dashboard_stats():
         completed_row = cur.fetchone()
         completed_docs = completed_row["completed_docs"] if completed_row else 0
 
-        cur.execute("SELECT raw_text FROM document_extractions;")
-        extractions = cur.fetchall() or []
+        cur.execute(
+            """
+            SELECT COALESCE(c.name, 'ทั่วไป') as category_name, de.raw_text 
+            FROM documents d
+            LEFT JOIN categories c ON d.category_id = c.id
+            LEFT JOIN document_extractions de ON d.id = de.document_id
+            WHERE de.raw_text IS NOT NULL;
+            """
+        )
+        extraction_rows = cur.fetchall() or []
 
         total_amount = 0.0
-        for ext in extractions:
-            meta = extract_structured_json(ext.get("raw_text") or "")
-            if meta.get("grand_total"):
-                total_amount += meta["grand_total"]
+        amount_by_category = {}
+        for row in extraction_rows:
+            meta = extract_structured_json(row.get("raw_text") or "")
+            amt = meta.get("grand_total")
+            if amt:
+                total_amount += amt
+                cat = row["category_name"]
+                amount_by_category[cat] = amount_by_category.get(cat, 0.0) + amt
+
+        amount_breakdown = [
+            {"category": k, "total": v} for k, v in amount_by_category.items()
+        ]
 
         cur.execute(
             """
@@ -851,6 +861,7 @@ def get_dashboard_stats():
             "total_documents": total_docs,
             "completed_documents": completed_docs,
             "total_amount_extracted": total_amount,
+            "amount_by_category": amount_breakdown,
             "top_category": top_cat["name"] if top_cat and top_cat.get("name") else "ทั่วไป",
             "department_breakdown": dept_stats,
             "category_breakdown": cat_stats
@@ -867,6 +878,7 @@ def get_dashboard_stats():
             "total_documents": 0,
             "completed_documents": 0,
             "total_amount_extracted": 0.0,
+            "amount_by_category": [],
             "top_category": "ทั่วไป",
             "department_breakdown": [],
             "category_breakdown": []
@@ -1097,7 +1109,6 @@ def get_document_versions(document_id: str):
         cur.close()
         conn.close()
 
-# ⭐️ Bulk Upload รองรับเลือกแผนกและรายบุคคล ⭐️
 @app.post("/api/documents/bulk-upload")
 async def bulk_upload_documents(
     category_id: int = Form(1),
@@ -1218,7 +1229,7 @@ def bulk_delete_documents(req: BulkDeleteRequest):
                 cur.execute("DELETE FROM document_extractions WHERE document_id = %s;", (doc_id,))
                 cur.execute("DELETE FROM document_versions WHERE document_id = %s;", (doc_id,))
                 cur.execute("DELETE FROM documents WHERE id = %s;", (doc_id,))
-                record_audit_log(req.username, "BULK_DELETE", doc_id, f"Deleted document {doc['document_code']}")
+                record_audit_log(req.username or "user", "BULK_DELETE", doc_id, f"Deleted document {doc['document_code']}")
                 deleted_count += 1
 
         conn.commit()
@@ -1231,6 +1242,7 @@ def bulk_delete_documents(req: BulkDeleteRequest):
         cur.close()
         conn.close()
 
+# ⭐️ จุดสำคัญ: รัน do_process_document ทันทีและส่งผลลัพธ์กลับแบบ Real-time ⭐️
 @app.post("/api/documents/{document_id}/retry-ocr")
 def retry_document_ocr(document_id: str, username: Optional[str] = Query("system")):
     conn = get_db_connection()
@@ -1242,24 +1254,18 @@ def retry_document_ocr(document_id: str, username: Optional[str] = Query("system
             raise HTTPException(status_code=404, detail="Document not found")
 
         record_audit_log(username, "RETRY_OCR", document_id, f"Retrying OCR for {doc['document_code']}")
-        process_document_ocr(document_id, doc["storage_key"], doc["file_name"])
+        
+        # ประมวลผลเอกสารโดยตรงและรับผลลัพธ์ทันที
+        result = do_process_document(document_id, doc["storage_key"], doc["file_name"])
 
-        cur.execute("SELECT raw_text FROM document_extractions WHERE document_id = %s;", (document_id,))
-        ext = cur.fetchone()
-        new_text = ext["raw_text"] if ext and ext.get("raw_text") else ""
-        new_structured = extract_structured_json(new_text)
-
-        invalidate_cache()
         return {
-            "message": "OCR processed successfully",
-            "extracted_text": new_text,
-            "structured_data": new_structured,
-            "smart_meta": {
-                "tax_id": new_structured.get("tax_id"),
-                "total_amount": new_structured.get("grand_total"),
-                "organization": new_structured.get("organization")
-            }
+            "message": "ประมวลผลเอกสารเรียบร้อยแล้ว",
+            "extracted_text": result.get("extracted_text", ""),
+            "structured_data": result.get("structured_data", {}),
+            "smart_meta": result.get("smart_meta", {})
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
         conn.close()
@@ -1531,7 +1537,7 @@ def update_document(document_id: str, req: UpdateDocRequest):
         conn.close()
 
 @app.delete("/api/documents/{document_id}")
-def delete_document(document_id: str, username: Optional[str] = Query("admin")):
+def delete_document(document_id: str, username: Optional[str] = Query("user")):
     conn = get_db_connection()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -1544,12 +1550,17 @@ def delete_document(document_id: str, username: Optional[str] = Query("admin")):
         doc_code = doc["document_code"]
         
         cur.execute("DELETE FROM document_extractions WHERE document_id = %s;", (document_id,))
+        cur.execute("DELETE FROM document_versions WHERE document_id = %s;", (document_id,))
         cur.execute("DELETE FROM documents WHERE id = %s;", (document_id,))
         conn.commit()
 
-        delete_file_from_minio(storage_key)
+        try:
+            delete_file_from_minio(storage_key)
+        except Exception:
+            pass
+
         invalidate_cache()
-        record_audit_log(username, "DELETE", document_id, f"Deleted document {doc_code}")
+        record_audit_log(username or "user", "DELETE", document_id, f"Deleted document {doc_code}")
 
         return {"message": "Document deleted successfully"}
     except Exception as e:

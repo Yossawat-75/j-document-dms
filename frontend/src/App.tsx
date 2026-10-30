@@ -275,6 +275,7 @@ export default function App() {
     total_documents: 0,
     completed_documents: 0,
     total_amount_extracted: 0,
+    amount_by_category: [] as { category: string; total: number }[],
     top_category: 'ทั่วไป',
     department_breakdown: [] as { name: string; count: number }[],
     category_breakdown: [] as { name: string; count: number }[]
@@ -299,6 +300,11 @@ export default function App() {
   const [showAdvancedFilter, setShowAdvancedFilter] = useState(false);
   const [showAnalyticsModal, setShowAnalyticsModal] = useState(false);
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+
+  // ⭐️ ข้อ 2: เคลียร์การติ๊กเลือกเอกสารเมื่อสลับ Role หรือผู้ใช้งาน
+  useEffect(() => {
+    setSelectedDocIds([]);
+  }, [currentUser?.role, currentUser?.id]);
 
   const [isBulk, setIsBulk] = useState(false);
   const [uploadTitle, setUploadTitle] = useState('');
@@ -474,6 +480,7 @@ export default function App() {
     sessionStorage.removeItem('dms_user');
     localStorage.removeItem('dms_user');
     setCurrentUser(null);
+    setSelectedDocIds([]);
   };
 
   const fetchStats = async () => {
@@ -691,6 +698,7 @@ export default function App() {
     }
   };
 
+  // ⭐️ ข้อ 3: Role USER ก็สามารถลบรายการเอกสารที่เลือกได้เช่นกัน
   const handleBulkDelete = async () => {
     if (selectedDocIds.length === 0) return;
     if (!confirm(`คุณต้องการลบเอกสารที่เลือกทั้งหมด ${selectedDocIds.length} รายการใช่หรือไม่?`)) return;
@@ -746,20 +754,51 @@ export default function App() {
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    const effectiveDeptId = (currentUser?.role !== 'ADMIN' && currentUser?.department_id) 
+      ? currentUser.department_id 
+      : uploadDeptId;
+
+    // ⭐️ ข้อ 4 (แบบ A): ตรวจสอบชื่อไฟล์และชื่อเอกสารซ้ำก่อนทำการอัปโหลด
+    if (isBulk) {
+      if (bulkFiles.length === 0) {
+        alert('กรุณาเลือกหรือสแกนไฟล์อย่างน้อย 1 ไฟล์');
+        return;
+      }
+
+      const duplicateBulkFiles = bulkFiles.filter(f => 
+        docs.some(d => d.file_name.toLowerCase() === f.name.toLowerCase() || d.title.toLowerCase() === f.name.replace(/\.[^/.]+$/, '').toLowerCase())
+      );
+
+      if (duplicateBulkFiles.length > 0) {
+        const confirmBulk = confirm(
+          `⚠️ ตรวจพบไฟล์ที่อาจมีชื่อซ้ำกับในระบบ ${duplicateBulkFiles.length} รายการ:\n- ` +
+          duplicateBulkFiles.map(f => f.name).slice(0, 5).join('\n- ') +
+          (duplicateBulkFiles.length > 5 ? `\n...และอื่นๆ` : '') +
+          `\n\nคุณต้องการอัปโหลดไฟล์ชุดนี้ต่อไปใช่หรือไม่?`
+        );
+        if (!confirmBulk) return;
+      }
+    } else {
+      if (!selectedSingleFile) {
+        alert('กรุณาเลือกไฟล์เอกสาร หรือถ่ายภาพจากกล้อง');
+        return;
+      }
+
+      const isTitleDuplicate = docs.some(d => d.title.trim().toLowerCase() === uploadTitle.trim().toLowerCase());
+      const isFileNameDuplicate = docs.some(d => d.file_name.toLowerCase() === selectedSingleFile.name.toLowerCase());
+
+      if (isTitleDuplicate || isFileNameDuplicate) {
+        const reason = isTitleDuplicate ? `ชื่อเอกสาร "${uploadTitle}"` : `ชื่อไฟล์ "${selectedSingleFile.name}"`;
+        const confirmUpload = confirm(`⚠️ พบว่า ${reason} มีอยู่ในระบบแล้ว คุณต้องการดำเนินการอัปโหลดต่อใช่หรือไม่?`);
+        if (!confirmUpload) return;
+      }
+    }
+
     setUploading(true);
 
     try {
-      const effectiveDeptId = (currentUser?.role !== 'ADMIN' && currentUser?.department_id) 
-        ? currentUser.department_id 
-        : uploadDeptId;
-
       if (isBulk) {
-        if (bulkFiles.length === 0) {
-          alert('กรุณาเลือกหรือสแกนไฟล์อย่างน้อย 1 ไฟล์');
-          setUploading(false);
-          return;
-        }
-
         const formData = new FormData();
         formData.append('category_id', uploadCatId.toString());
         formData.append('department_id', effectiveDeptId.toString());
@@ -785,12 +824,6 @@ export default function App() {
         clearAllBulkFiles();
         showToast(data.message || `อัปโหลดสำเร็จ ${bulkFiles.length} รายการ`);
       } else {
-        if (!selectedSingleFile) {
-          alert('กรุณาเลือกไฟล์เอกสาร หรือถ่ายภาพจากกล้อง');
-          setUploading(false);
-          return;
-        }
-
         const formData = new FormData();
         formData.append('title', uploadTitle);
         formData.append('document_code', uploadCode);
@@ -803,7 +836,7 @@ export default function App() {
         formData.append('allowed_departments', uploadAllowedDepts.join(','));
         formData.append('allowed_users', uploadAllowedUsers.join(','));
         formData.append('username', currentUser?.username || 'admin');
-        formData.append('file', selectedSingleFile);
+        formData.append('file', selectedSingleFile!);
 
         const res = await fetch(`${API_BASE}/documents/upload`, {
           method: 'POST',
@@ -909,31 +942,41 @@ export default function App() {
     }
   };
 
+  // ⭐️ ฟังก์ชัน Retry OCR ที่ปรับปรุงใหม่ รอ Worker ประมวลผลและดึงข้อมูลกลับมาแสดงอัตโนมัติ
   const handleRetryOcr = async () => {
     if (!activeDoc) return;
     setRetryingOcr(true);
     try {
-      const res = await fetch(`${API_BASE}/documents/${activeDoc.id}/retry-ocr?username=${currentUser?.username}`, {
+      const res = await fetch(`${API_BASE}/documents/${activeDoc.id}/retry-ocr?username=${encodeURIComponent(currentUser?.username || 'admin')}`, {
         method: 'POST'
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'ไม่สามารถสั่ง Retry OCR ได้');
       
-      setEditText(data.extracted_text || '');
-      setActiveDoc((prev) => prev ? {
-        ...prev,
-        status: 'COMPLETED',
-        extracted_text: data.extracted_text || '',
-        smart_meta: data.smart_meta || prev.smart_meta,
-        structured_data: data.structured_data || prev.structured_data
-      } : null);
+      showToast('ส่งคำขอวิเคราะห์เอกสารใหม่แล้ว กำลังประมวลผล...');
 
-      fetchDocs();
-      fetchStats();
-      showToast('วิเคราะห์ OCR ใหม่เรียบร้อยแล้ว!');
+      // หน่วงเวลา 1.5 วินาทีเพื่อให้ Worker ทำงานเสร็จ แล้วดึงข้อมูลใหม่มาแสดง
+      setTimeout(async () => {
+        try {
+          const detailRes = await fetch(`${API_BASE}/documents/${activeDoc.id}?username=${encodeURIComponent(currentUser?.username || 'admin')}`);
+          const updatedDoc = await detailRes.json();
+          if (detailRes.ok) {
+            setActiveDoc(updatedDoc);
+            setEditText(updatedDoc.extracted_text || '');
+            setEditTags(updatedDoc.tags || '');
+          }
+        } catch (err) {
+          console.error('Failed to reload doc after retry', err);
+        } finally {
+          fetchDocs();
+          fetchStats();
+          setRetryingOcr(false);
+          showToast('วิเคราะห์เอกสารใหม่เรียบร้อยแล้ว!');
+        }
+      }, 1500);
+
     } catch (err: any) {
       alert(err.message);
-    } finally {
       setRetryingOcr(false);
     }
   };
@@ -958,13 +1001,17 @@ export default function App() {
     document.body.removeChild(element);
   };
 
+  // ⭐️ ข้อ 3: ฟังก์ชันลบเอกสาร รองรับทุก Role
   const handleDelete = async (id: string) => {
     if (!confirm('คุณต้องการลบเอกสารฉบับนี้ออกจากระบบใช่หรือไม่?')) return;
     try {
-      const res = await fetch(`${API_BASE}/documents/${id}?username=${currentUser?.username}`, {
+      const res = await fetch(`${API_BASE}/documents/${id}?username=${encodeURIComponent(currentUser?.username || 'user')}`, {
         method: 'DELETE'
       });
-      if (!res.ok) throw new Error('ลบเอกสารไม่สำเร็จ');
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || 'ลบเอกสารไม่สำเร็จ');
+      }
       
       setActiveDoc(null);
       fetchDocs();
@@ -1334,8 +1381,8 @@ export default function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-6 mt-6 space-y-6">
-        {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        {/* ⭐️ KPI Cards: 3 คอลัมน์ พร้อมแจกแจงยอดเงินแยกตามประเภทเอกสาร ⭐️ */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className={`border rounded-xl p-4 shadow-sm flex items-center gap-4 transition-colors ${isDark ? 'bg-[#0f172a] border-slate-800' : 'bg-white border-slate-200 shadow-slate-100'}`}>
             <div className="p-3 bg-cyan-500/10 border border-cyan-500/20 rounded-lg text-cyan-500">
               <FileText className="w-6 h-6" />
@@ -1356,23 +1403,37 @@ export default function App() {
             </div>
           </div>
 
-          <div className={`border rounded-xl p-4 shadow-sm flex items-center gap-4 transition-colors ${isDark ? 'bg-[#0f172a] border-slate-800' : 'bg-white border-slate-200 shadow-slate-100'}`}>
-            <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-500">
-              <DollarSign className="w-6 h-6" />
+          {/* ⭐️ การ์ดยอดเงินแยกตามประเภทเอกสาร (ตามคำแนะนำของอาจารย์) ⭐️ */}
+          <div className={`border rounded-xl p-4 shadow-sm flex flex-col justify-between transition-colors ${isDark ? 'bg-[#0f172a] border-slate-800' : 'bg-white border-slate-200 shadow-slate-100'}`}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-500">
+                  <DollarSign className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className={`text-xs font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>ยอดเงินแยกตามประเภท</p>
+                  <p className="text-[10px] text-slate-400">รวมทั้งหมด: ฿{stats.total_amount_extracted.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</p>
+                </div>
+              </div>
             </div>
-            <div>
-              <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>ยอดเงินรวมในระบบ</p>
-              <h3 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{stats.total_amount_extracted.toLocaleString('th-TH', { minimumFractionDigits: 2 })}</h3>
-            </div>
-          </div>
 
-          <div className={`border rounded-xl p-4 shadow-sm flex items-center gap-4 transition-colors ${isDark ? 'bg-[#0f172a] border-slate-800' : 'bg-white border-slate-200 shadow-slate-100'}`}>
-            <div className="p-3 bg-purple-500/10 border border-purple-500/20 rounded-lg text-purple-500">
-              <Building2 className="w-6 h-6" />
-            </div>
-            <div>
-              <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>หมวดหมู่ยอดนิยม</p>
-              <h3 className={`text-base font-bold truncate max-w-[150px] ${isDark ? 'text-white' : 'text-slate-900'}`}>{stats.top_category}</h3>
+            <div className="space-y-1.5 mt-1 max-h-24 overflow-y-auto pr-1">
+              {stats.amount_by_category && stats.amount_by_category.length > 0 ? (
+                stats.amount_by_category.map((item, idx) => (
+                  <div key={idx} className={`flex items-center justify-between text-xs px-2.5 py-1 rounded-lg border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-100'}`}>
+                    <span className={`text-[11px] truncate max-w-[130px] ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                      • {item.category}
+                    </span>
+                    <span className="font-mono font-bold text-emerald-500 text-xs">
+                      ฿{item.total.toLocaleString('th-TH', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="text-center py-2 text-[11px] text-slate-400">
+                  ยังไม่พบข้อมูลยอดเงินในเอกสาร
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1899,14 +1960,13 @@ export default function App() {
                     <FileSpreadsheet className="w-3.5 h-3.5" /> Export ที่เลือก ({selectedDocIds.length})
                   </button>
 
-                  {currentUser.role === 'ADMIN' && (
-                    <button
-                      onClick={handleBulkDelete}
-                      className="px-3 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg font-semibold flex items-center gap-1.5 transition"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" /> ลบที่เลือกทั้งหมด
-                    </button>
-                  )}
+                  {/* ⭐️ ข้อ 3: เปิดให้ทุก Role (รวมทั้ง USER) ลบรายการที่ติ๊กเลือกได้ */}
+                  <button
+                    onClick={handleBulkDelete}
+                    className="px-3 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg font-semibold flex items-center gap-1.5 transition"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" /> ลบที่เลือกทั้งหมด
+                  </button>
                 </div>
               </div>
             )}
@@ -2102,13 +2162,23 @@ export default function App() {
                           )}
                         </td>
                         <td className="py-3 px-3 text-right">
-                          <button
-                            onClick={() => openInspector(doc.id)}
-                            className={`p-1.5 rounded-lg border transition ${isDark ? 'bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border-cyan-500/30' : 'bg-cyan-50 hover:bg-cyan-100 text-cyan-700 border-cyan-200'}`}
-                            title="เปิด Inspector ดูรายละเอียด"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </button>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => openInspector(doc.id)}
+                              className={`p-1.5 rounded-lg border transition ${isDark ? 'bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border-cyan-500/30' : 'bg-cyan-50 hover:bg-cyan-100 text-cyan-700 border-cyan-200'}`}
+                              title="เปิด Inspector ดูรายละเอียด"
+                            >
+                              <Eye className="w-4 h-4" />
+                            </button>
+                            {/* ⭐️ ข้อ 3: เพิ่มปุ่มลบเอกสารตรงแถวตารางให้ทุก Role กดได้ */}
+                            <button
+                              onClick={() => handleDelete(doc.id)}
+                              className="p-1.5 text-slate-400 hover:text-rose-500 rounded-lg hover:bg-rose-500/10 transition"
+                              title="ลบเอกสารนี้"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))
@@ -2567,14 +2637,13 @@ export default function App() {
             </div>
 
             <div className={`px-6 py-3.5 border-t flex items-center justify-between ${isDark ? 'bg-[#131d33] border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
-              {currentUser.role === 'ADMIN' ? (
-                <button
-                  onClick={() => handleDelete(activeDoc.id)}
-                  className="px-3.5 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 border border-rose-500/30 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> ลบเอกสาร
-                </button>
-              ) : <div />}
+              {/* ⭐️ ข้อ 3: เปิดให้ทุก Role สามารถลบเอกสารที่กำลัง Inspect ดูได้ */}
+              <button
+                onClick={() => handleDelete(activeDoc.id)}
+                className="px-3.5 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 border border-rose-500/30 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> ลบเอกสาร
+              </button>
 
               <div className="flex items-center gap-2">
                 <button
