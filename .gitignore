@@ -32,3 +32,4 @@ minio_data/
 .idea/
 .DS_Store
 Thumbs.db
+.copilot-specs-cache/
